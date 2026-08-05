@@ -1,7 +1,20 @@
 import ExcelJS from "exceljs";
-import { MANUAL_CUENTA_OVERRIDES, MIAMI_ACCOUNT, TRANSFER_ACCOUNT_NAMES } from "./config";
+import { ACCOUNT_MAP, MANUAL_CUENTA_OVERRIDES, MIAMI_ACCOUNT, TRANSFER_ACCOUNT_NAMES } from "./config";
 import type { SapDoc } from "./types";
 import { cellValue, norm, normAccount, parseDate, parseMoney } from "./utils";
+
+const normalizeStr = (s: string) => 
+  s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^A-Z0-9]/gi, "").toUpperCase();
+
+function getExactAccountKey(raw: string): string {
+  const bankName = TRANSFER_ACCOUNT_NAMES[raw] || raw;
+  const match = Object.keys(ACCOUNT_MAP).find(key => 
+    normalizeStr(key) === normalizeStr(bankName) || 
+    normalizeStr(bankName).includes(normalizeStr(key)) || 
+    normalizeStr(key).includes(normalizeStr(bankName))
+  );
+  return match || bankName;
+}
 
 function buildHeaderCols(ws: ExcelJS.Worksheet): Map<string, number> {
   const col = new Map<string, number>();
@@ -163,7 +176,7 @@ export function convertApiToSapDocs(incomingPayments: any[], vendorPayments: any
     if (p.Remarks && norm(p.Remarks) === "CANCELADO") continue;
 
     let rawCuenta = p.TransferAccount || p.CashAccount || p.Reference1 || p.CardCode;
-    let cuenta = TRANSFER_ACCOUNT_NAMES[rawCuenta] || rawCuenta;
+    let cuenta = getExactAccountKey(rawCuenta);
     const override = MANUAL_CUENTA_OVERRIDES[String(p.DocNum)];
     if (override) cuenta = override;
 
@@ -190,7 +203,7 @@ export function convertApiToSapDocs(incomingPayments: any[], vendorPayments: any
     if (p.Remarks && norm(p.Remarks) === "CANCELADO") continue;
 
     let rawCuenta = p.TransferAccount || p.CashAccount || p.Reference1 || p.CardCode;
-    let cuenta = TRANSFER_ACCOUNT_NAMES[rawCuenta] || rawCuenta;
+    let cuenta = getExactAccountKey(rawCuenta);
     const override = MANUAL_CUENTA_OVERRIDES[String(p.DocNum)];
     if (override) cuenta = override;
 
