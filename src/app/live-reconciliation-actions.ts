@@ -119,21 +119,7 @@ export async function syncSingleToSharepointGraph(
   col: number,
   docNumStr: string
 ) {
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) {
-    throw new Error('Unauthorized');
-  }
-
-  try {
-    const { updateExcelCell } = await import('@/lib/graph/sharepoint');
-    const cellAddress = `${colToLetter(col)}${row}`;
-    await updateExcelCell(fileName, sheetName, cellAddress, docNumStr);
-    return { success: true };
-  } catch (error: any) {
-    console.error("Error en syncSingleToSharepointGraph:", error);
-    return { success: false, error: error.message || String(error) };
-  }
+  return syncBulkToSharepointGraph([{ fileName, sheetName, row, col, docNumStr }]);
 }
 
 export async function syncBulkToSharepointGraph(
@@ -151,15 +137,48 @@ export async function syncBulkToSharepointGraph(
     throw new Error('Unauthorized');
   }
 
-  const { updateExcelCell } = await import('@/lib/graph/sharepoint');
+  const { downloadDriveFile, uploadDriveFile } = await import('@/lib/graph/sharepoint');
+  const ExcelJS = (await import('exceljs')).default;
+  const { FILL_MATCHED } = await import('@/lib/conciliacion/config');
+  
   const errors: string[] = [];
 
+  // Group by fileName to minimize downloads and uploads
+  const filesMap = new Map<string, typeof items>();
   for (const item of items) {
+    if (!filesMap.has(item.fileName)) {
+      filesMap.set(item.fileName, []);
+    }
+    filesMap.get(item.fileName)!.push(item);
+  }
+
+  for (const [fileName, fileItems] of filesMap.entries()) {
     try {
-      const cellAddress = `${colToLetter(item.col)}${item.row}`;
-      await updateExcelCell(item.fileName, item.sheetName, cellAddress, item.docNumStr);
+      const buffer = await downloadDriveFile(fileName);
+      const wb = new ExcelJS.Workbook();
+      await wb.xlsx.load(buffer as any);
+
+      for (const item of fileItems) {
+        const ws = wb.getWorksheet(item.sheetName);
+        if (ws) {
+          const row = ws.getRow(item.row);
+          const cell = row.getCell(item.col);
+          cell.value = item.docNumStr;
+          cell.fill = {
+            type: 'pattern',
+            pattern: 'solid',
+            fgColor: { argb: FILL_MATCHED }
+          };
+          row.commit();
+        } else {
+           errors.push(`Error en ${item.docNumStr}: Hoja ${item.sheetName} no encontrada en ${fileName}`);
+        }
+      }
+
+      const outBuffer = await wb.xlsx.writeBuffer();
+      await uploadDriveFile(fileName, outBuffer as any);
     } catch (e: any) {
-      errors.push(`Error en ${item.docNumStr}: ${e.message}`);
+      errors.push(`Error procesando archivo ${fileName}: ${e.message}`);
     }
   }
 
