@@ -1,5 +1,5 @@
 import ExcelJS from "exceljs";
-import { MANUAL_CUENTA_OVERRIDES, MIAMI_ACCOUNT } from "./config";
+import { MANUAL_CUENTA_OVERRIDES, MIAMI_ACCOUNT, TRANSFER_ACCOUNT_NAMES } from "./config";
 import type { SapDoc } from "./types";
 import { cellValue, norm, normAccount, parseDate, parseMoney } from "./utils";
 
@@ -162,7 +162,8 @@ export function convertApiToSapDocs(incomingPayments: any[], vendorPayments: any
     if (p.JournalRemarks && norm(p.JournalRemarks) === "CANCELADO") continue;
     if (p.Remarks && norm(p.Remarks) === "CANCELADO") continue;
 
-    let cuenta = p.Reference1 || p.CardCode;
+    let rawCuenta = p.TransferAccount || p.CashAccount || p.Reference1 || p.CardCode;
+    let cuenta = TRANSFER_ACCOUNT_NAMES[rawCuenta] || rawCuenta;
     const override = MANUAL_CUENTA_OVERRIDES[String(p.DocNum)];
     if (override) cuenta = override;
 
@@ -188,7 +189,8 @@ export function convertApiToSapDocs(incomingPayments: any[], vendorPayments: any
     if (p.JournalRemarks && norm(p.JournalRemarks) === "CANCELADO") continue;
     if (p.Remarks && norm(p.Remarks) === "CANCELADO") continue;
 
-    let cuenta = p.TransferAccount;
+    let rawCuenta = p.TransferAccount || p.CashAccount || p.Reference1 || p.CardCode;
+    let cuenta = TRANSFER_ACCOUNT_NAMES[rawCuenta] || rawCuenta;
     const override = MANUAL_CUENTA_OVERRIDES[String(p.DocNum)];
     if (override) cuenta = override;
 
