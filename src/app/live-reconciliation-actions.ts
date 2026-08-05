@@ -137,13 +137,9 @@ export async function syncBulkToSharepointGraph(
     throw new Error('Unauthorized');
   }
 
-  const { downloadDriveFile, uploadDriveFile } = await import('@/lib/graph/sharepoint');
-  const ExcelJS = (await import('exceljs')).default;
-  const { FILL_MATCHED } = await import('@/lib/conciliacion/config');
+  const { updateExcelCellsBatch } = await import('@/lib/graph/sharepoint');
   
   const errors: string[] = [];
-
-  // Group by fileName to minimize downloads and uploads
   const filesMap = new Map<string, typeof items>();
   for (const item of items) {
     if (!filesMap.has(item.fileName)) {
@@ -154,29 +150,13 @@ export async function syncBulkToSharepointGraph(
 
   for (const [fileName, fileItems] of filesMap.entries()) {
     try {
-      const buffer = await downloadDriveFile(fileName);
-      const wb = new ExcelJS.Workbook();
-      await wb.xlsx.load(buffer as any);
-
-      for (const item of fileItems) {
-        const ws = wb.getWorksheet(item.sheetName);
-        if (ws) {
-          const row = ws.getRow(item.row);
-          const cell = row.getCell(item.col);
-          cell.value = item.docNumStr;
-          cell.fill = {
-            type: 'pattern',
-            pattern: 'solid',
-            fgColor: { argb: FILL_MATCHED }
-          };
-          row.commit();
-        } else {
-           errors.push(`Error en ${item.docNumStr}: Hoja ${item.sheetName} no encontrada en ${fileName}`);
-        }
-      }
-
-      const outBuffer = await wb.xlsx.writeBuffer();
-      await uploadDriveFile(fileName, outBuffer as any);
+      const updates = fileItems.map(item => ({
+        sheetName: item.sheetName,
+        cellAddress: `${colToLetter(item.col)}${item.row}`,
+        value: item.docNumStr,
+        color: "#C6EFCE" // FILL_MATCHED (verde suave)
+      }));
+      await updateExcelCellsBatch(fileName, updates);
     } catch (e: any) {
       errors.push(`Error procesando archivo ${fileName}: ${e.message}`);
     }

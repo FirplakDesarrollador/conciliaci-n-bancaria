@@ -121,3 +121,70 @@ export async function updateExcelCell(
   }
 }
 
+export async function updateExcelCellsBatch(
+  fileName: string,
+  updates: { sheetName: string; cellAddress: string; value: string | number; color: string }[]
+): Promise<void> {
+  const token = await getGraphAccessToken();
+  const path = `${CONCILIACION_FOLDER_PATH}/${fileName}`;
+  
+  const fileRes = await fetch(
+    `${GRAPH_BASE_URL}/drives/${CONCILIACION_DRIVE_ID}/root:${encodeDrivePath(path)}`,
+    { headers: { Authorization: `Bearer ${token}` }, cache: "no-store" }
+  );
+  if (!fileRes.ok) {
+    throw new Error(`No se pudo obtener el ID del archivo ${fileName} (HTTP ${fileRes.status})`);
+  }
+  const fileData = await fileRes.json();
+  const fileId = fileData.id;
+
+  const requests: any[] = [];
+  let reqId = 1;
+
+  for (const update of updates) {
+    const rangeUrl = `/drives/${CONCILIACION_DRIVE_ID}/items/${fileId}/workbook/worksheets('${update.sheetName}')/range(address='${update.cellAddress}')`;
+    
+    // Request to update the value
+    requests.push({
+      id: String(reqId++),
+      method: "PATCH",
+      url: rangeUrl,
+      body: { values: [[update.value]] },
+      headers: { "Content-Type": "application/json" }
+    });
+    
+    // Request to update the background color
+    requests.push({
+      id: String(reqId++),
+      method: "PATCH",
+      url: `${rangeUrl}/format/fill`,
+      body: { color: update.color },
+      headers: { "Content-Type": "application/json" }
+    });
+  }
+
+  // Microsoft Graph $batch API has a limit of 20 requests per batch.
+  for (let i = 0; i < requests.length; i += 20) {
+    const batch = requests.slice(i, i + 20);
+    const batchRes = await fetch(`${GRAPH_BASE_URL}/$batch`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ requests: batch })
+    });
+    
+    if (!batchRes.ok) {
+      throw new Error(`Error en batch update a SharePoint: ${batchRes.status} - ${await batchRes.text()}`);
+    }
+    
+    const batchData = await batchRes.json();
+    for (const res of batchData.responses || []) {
+      if (res.status >= 400) {
+        throw new Error(`Error actualizando celda (Status ${res.status}): ${JSON.stringify(res.body)}`);
+      }
+    }
+  }
+}
+
