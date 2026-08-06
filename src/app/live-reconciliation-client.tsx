@@ -134,7 +134,7 @@ export default function LiveReconciliationClient({
       const result = await generateExcelReport(sapPayments, vendorPayments, Array.from(matchedSet));
       
       if (!result.success || !result.base64) {
-        setSyncError(result.error || "Ocurrió un error al generar el reporte.");
+        setSyncResult({ status: 'error', message: result.error || "Ocurrió un error al generar el reporte." });
         return;
       }
 
@@ -157,7 +157,7 @@ export default function LiveReconciliationClient({
       document.body.removeChild(a);
 
     } catch (error: any) {
-      setSyncError(error.message || String(error));
+      setSyncResult({ status: 'error', message: error.message || String(error) });
     } finally {
       setIsDownloading(false);
     }
