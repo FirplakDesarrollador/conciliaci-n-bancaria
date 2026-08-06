@@ -156,14 +156,17 @@ export async function syncBulkToSharepointGraph(
         value: item.docNumStr,
         color: "#C6EFCE" // FILL_MATCHED (verde suave)
       }));
-      await updateExcelCellsBatch(fileName, updates);
+      const res = await updateExcelCellsBatch(fileName, updates);
+      if (!res.success && res.errors) {
+        errors.push(`Errores en archivo ${fileName}: ${res.errors.join(' | ')}`);
+      }
     } catch (e: any) {
-      errors.push(`Error procesando archivo ${fileName}: ${e.message}`);
+      errors.push(`Excepción procesando archivo ${fileName}: ${e.message}`);
     }
   }
 
   if (errors.length > 0) {
-    return { success: false, error: errors.join(" | ") };
+    return { success: false, error: errors.join("\n\n") };
   }
   return { success: true };
 }
@@ -178,7 +181,17 @@ export async function generateExcelReport(
     const wb = new ExcelJS.Workbook();
     
     const supabase = await createClient();
-    const { data: history, error } = await supabase.from('reconciliation_history').select('*');
+    
+    const now = new Date();
+    const yesterday = new Date(now);
+    yesterday.setDate(yesterday.getDate() - 1);
+    yesterday.setHours(0, 0, 0, 0);
+
+    const { data: history, error } = await supabase
+      .from('reconciliation_history')
+      .select('*')
+      .gte('created_at', yesterday.toISOString());
+      
     if (error) throw error;
 
     const historySap = (history || []).filter(h => h.tipo === 'Recibido');

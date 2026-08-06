@@ -37,9 +37,9 @@ export default function LiveReconciliationClient({
 }: LiveReconciliationClientProps) {
   const [bankList, setBankList] = useState<BankItem[]>(initialBankList);
   const [isSyncing, setIsSyncing] = useState(false);
-  const [isDownloading, setIsDownloading] = useState(false);
-  const [syncError, setSyncError] = useState<string | null>(null);
   const [syncingItems, setSyncingItems] = useState<Set<string>>(new Set());
+  const [syncResult, setSyncResult] = useState<{ status: 'idle' | 'syncing' | 'success' | 'error', message?: string }>({ status: 'idle' });
+  const [isDownloading, setIsDownloading] = useState(false);
 
   const handleSyncSingle = async (bankItem: BankItem, itemDocs: BankDocs) => {
     const docNumsStr = itemDocs.docs.map((d: any) => d.docNum).join("-");
@@ -118,7 +118,7 @@ export default function LiveReconciliationClient({
 
   const handleDownloadReport = async () => {
     setIsDownloading(true);
-    setSyncError(null);
+    setSyncResult({ status: 'idle' });
     try {
       // Recolectar todos los docNums que tienen match
       const matchedSet = new Set<string>();
@@ -165,7 +165,7 @@ export default function LiveReconciliationClient({
 
   const handleSync = async () => {
     setIsSyncing(true);
-    setSyncError(null);
+    setSyncResult({ status: 'syncing' });
 
     const itemsToSync: {
        fileName: string;
@@ -193,6 +193,7 @@ export default function LiveReconciliationClient({
 
     if (itemsToSync.length === 0) {
        setIsSyncing(false);
+       setSyncResult({ status: 'idle' });
        alert("No hay documentos válidos pendientes para sincronizar.");
        return;
     }
@@ -208,8 +209,9 @@ export default function LiveReconciliationClient({
       const result = await syncBulkToSharepointGraph(itemsToSync);
       
       if (!result.success) {
-        setSyncError(result.error || "Ocurrió un error al sincronizar algunos documentos.");
+        setSyncResult({ status: 'error', message: result.error || "Ocurrió un error al sincronizar algunos documentos." });
       } else {
+        setSyncResult({ status: 'success', message: '¡Sincronización completada exitosamente!' });
         // Log to history for all successfully matched items
         const historyItems: any[] = [];
         itemsToSync.forEach(syncItem => {
@@ -316,9 +318,52 @@ export default function LiveReconciliationClient({
         </div>
       </div>
 
-      {syncError && (
-        <div className="mb-4 rounded-lg bg-red-50 p-4 border border-red-200">
-          <p className="text-sm text-red-600 font-medium">Error en sincronización: {syncError}</p>
+      {syncResult.status === 'syncing' && (
+        <div className="mb-4 rounded-xl border border-blue-200 bg-blue-50 p-5 shadow-sm">
+          <div className="flex justify-between items-center mb-2">
+            <span className="text-sm font-bold text-blue-800 flex items-center gap-2">
+              <svg className="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+              Sincronizando con SharePoint...
+            </span>
+            <span className="text-xs font-medium text-blue-600 bg-blue-100 px-2 py-1 rounded-full">Procesando en segundo plano</span>
+          </div>
+          <p className="text-xs text-blue-700 mb-3 opacity-80">Puedes continuar navegando o realizando otras tareas. Te avisaremos cuando finalice.</p>
+          <div className="w-full bg-blue-200/50 rounded-full h-2 overflow-hidden">
+            <div className="bg-blue-600 h-2 rounded-full animate-pulse w-full origin-left transform scale-x-100 transition-transform duration-1000"></div>
+          </div>
+        </div>
+      )}
+
+      {syncResult.status === 'error' && (
+        <div className="mb-4 rounded-xl border border-red-200 bg-red-50 p-5 shadow-sm">
+          <h3 className="text-sm font-bold text-red-800 flex items-center gap-2 mb-2">
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" /></svg>
+            Sincronización finalizada con errores
+          </h3>
+          <div className="text-xs text-red-700 max-h-40 overflow-y-auto pr-2 custom-scrollbar">
+            <ul className="list-disc pl-4 space-y-1">
+              {syncResult.message?.split('\n\n').map((msg, i) => (
+                <li key={i} className="whitespace-pre-wrap">{msg}</li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      )}
+
+      {syncResult.status === 'success' && (
+        <div className="mb-4 rounded-xl border border-emerald-200 bg-emerald-50 p-4 shadow-sm flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="flex h-8 w-8 items-center justify-center rounded-full bg-emerald-100 text-emerald-600">
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" /></svg>
+            </div>
+            <div>
+              <h3 className="text-sm font-bold text-emerald-800">¡Sincronización Exitosa!</h3>
+              <p className="text-xs text-emerald-600">{syncResult.message}</p>
+            </div>
+          </div>
+          <button onClick={() => setSyncResult({ status: 'idle' })} className="text-emerald-500 hover:text-emerald-700 p-1">
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" /></svg>
+          </button>
         </div>
       )}
       
