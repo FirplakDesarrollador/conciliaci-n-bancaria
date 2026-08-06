@@ -260,7 +260,7 @@ export default function LiveReconciliationClient({
       }));
 
     } catch (e: any) {
-      setSyncError(e.message || String(e));
+      setSyncResult({ status: 'error', message: e.message || String(e) });
       setBankList(initialBankList);
     } finally {
       setIsSyncing(false);
