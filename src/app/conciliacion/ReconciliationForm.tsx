@@ -13,24 +13,35 @@ export default function ReconciliationForm() {
       <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
         <h3 className="mb-2 text-xl font-bold text-slate-900">Conciliación diaria bancos</h3>
         <p className="mb-6 text-sm text-slate-500">
-          Cruza el informe SAP contra los archivos de banco en SharePoint (carpeta FIRPLAK 2026) y sube los
-          resultados conciliados de vuelta a la misma carpeta.
+          Consulta la API de SAP en el rango de fechas seleccionado y cruza la información contra los archivos de banco en SharePoint (carpeta FIRPLAK 2026), subiendo los resultados conciliados a la misma carpeta.
         </p>
 
         <form
           action={formAction}
           className="flex flex-col gap-4"
         >
-          <label className="flex flex-col gap-1 text-sm font-medium text-slate-700">
-            Informe SAP (Informe_de_recaudos_y_pagos.xlsx)
-            <input
-              type="file"
-              name="sapFile"
-              accept=".xlsx"
-              required
-              className="mt-1 block w-full rounded-md border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
-            />
-          </label>
+          <div className="flex gap-4">
+            <label className="flex flex-1 flex-col gap-1 text-sm font-medium text-slate-700">
+              Fecha de inicio
+              <input
+                type="date"
+                name="startDate"
+                required
+                defaultValue={new Date(new Date().setDate(1)).toISOString().split('T')[0]}
+                className="mt-1 block w-full rounded-md border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+              />
+            </label>
+            <label className="flex flex-1 flex-col gap-1 text-sm font-medium text-slate-700">
+              Fecha fin
+              <input
+                type="date"
+                name="endDate"
+                required
+                defaultValue={new Date().toISOString().split('T')[0]}
+                className="mt-1 block w-full rounded-md border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+              />
+            </label>
+          </div>
           <button
             type="submit"
             disabled={isPending}
