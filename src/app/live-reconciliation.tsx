@@ -1,4 +1,4 @@
-import { TRANSFER_ACCOUNT_NAMES, ACCOUNT_MAP } from "@/lib/conciliacion/config";
+import { TRANSFER_ACCOUNT_NAMES, ACCOUNT_MAP, MANUAL_CUENTA_OVERRIDES } from "@/lib/conciliacion/config";
 import { listDriveFiles, downloadDriveFile } from "@/lib/graph/sharepoint";
 import ExcelJS from "exceljs";
 import { findHeaderRowAndCols, READERS, REQUIRED_HEADERS_HINT, fixCompensacionDates } from "@/lib/conciliacion/readers";
@@ -17,7 +17,8 @@ export default async function LiveReconciliation({
   const processPayment = (payment: any) => {
     const acc = payment.TransferAccount || payment.CashAccount;
     if (!acc) return;
-    const bankName = TRANSFER_ACCOUNT_NAMES[acc] || acc;
+    const override = MANUAL_CUENTA_OVERRIDES[String(payment.DocNum)];
+    const bankName = override || TRANSFER_ACCOUNT_NAMES[acc] || acc;
     if (!bankMap.has(bankName)) {
       bankMap.set(bankName, []);
     }

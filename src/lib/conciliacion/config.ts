@@ -76,6 +76,11 @@ export const MANUAL_CUENTA_OVERRIDES: Record<string, string> = {
   // Enlace Operativo S.A., $2.647.400, 5-jun) realmente se hizo desde
   // Bancolombia.
   "20042394": "BANCOL.CTE # 008-927404-01",
+  // El 80816 (18-ago) es un traslado de Bancolombia hacia la Fiducia: SAP
+  // registra en TransferAccount la cuenta contable de la Fiducia (12450505,
+  // que ni siquiera está en TRANSFER_ACCOUNT_NAMES), pero el movimiento real
+  // a conciliar es el débito que sale de Bancolombia.
+  "80816": "BANCOL.CTE # 008-927404-01",
 };
 
 // Cuenta de compensación en Miami: opera en USD, a diferencia de las demás
