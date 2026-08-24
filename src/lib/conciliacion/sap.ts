@@ -169,58 +169,107 @@ export function convertApiToSapDocs(incomingPayments: any[], vendorPayments: any
   const docs: SapDoc[] = [];
 
   for (const p of incomingPayments) {
-    const valor = p.TransferSum || p.CashSum || 0;
-    if (!p.DocNum || !p.DocDate || valor === 0) continue;
-    
+    if (!p.DocNum || !p.DocDate) continue;
     if (p.JournalRemarks && norm(p.JournalRemarks) === "CANCELADO") continue;
     if (p.Remarks && norm(p.Remarks) === "CANCELADO") continue;
 
-    let rawCuenta = p.TransferAccount || p.CashAccount || p.Reference1 || p.CardCode;
-    let cuenta = getExactAccountKey(rawCuenta);
-    const override = MANUAL_CUENTA_OVERRIDES[String(p.DocNum)];
-    if (override) cuenta = override;
+    const isGlobalUSD = p.DocCurrency === 'USD' && p.DocRate > 0;
 
-    docs.push({
-      docNum: String(p.DocNum),
-      date: new Date(p.DocDate),
-      value: valor,
-      tercero: norm(p.U_DescripTercero || p.CardName),
-      cuenta: normAccount(cuenta),
-      comentario: String(p.JournalRemarks || p.Remarks || ""),
-      tipo: "IN",
-      infoDetallada: norm(p.JournalRemarks || p.Remarks),
-      categoria: "",
-      used: false,
-      usedBy: "",
-    });
+    const addLeg = (rawCuenta: string, localVal: number, fcVal: number | null, overrideTipo: string = "IN") => {
+      let cuenta = getExactAccountKey(rawCuenta);
+      const override = MANUAL_CUENTA_OVERRIDES[String(p.DocNum)];
+      if (override) cuenta = override;
+
+      const isMiami = normAccount(cuenta) === normAccount(MIAMI_ACCOUNT);
+      
+      let finalVal = localVal;
+      if (isMiami) {
+        if (fcVal && fcVal > 0) finalVal = fcVal;
+        else if (isGlobalUSD) finalVal = localVal / p.DocRate;
+      }
+      
+      if (finalVal <= 0) return;
+
+      docs.push({
+        docNum: String(p.DocNum),
+        date: new Date(p.DocDate),
+        value: finalVal,
+        tercero: norm(p.U_DescripTercero || p.CardName),
+        cuenta: normAccount(cuenta),
+        comentario: String(p.JournalRemarks || p.Remarks || ""),
+        tipo: overrideTipo as "IN" | "OUT",
+        infoDetallada: norm(p.JournalRemarks || p.Remarks),
+        categoria: "",
+        used: false,
+        usedBy: "",
+      });
+    };
+
+    const mainAcc = p.TransferAccount || p.CashAccount;
+    if (mainAcc) {
+      const mainVal = p.TransferSum || p.CashSum || 0;
+      addLeg(mainAcc, mainVal, null, "IN");
+    }
+
+    if (p.PaymentAccounts && p.PaymentAccounts.length > 0) {
+      for (const pa of p.PaymentAccounts) {
+        if (pa.AccountCode && pa.SumPaid) {
+          addLeg(pa.AccountCode, pa.SumPaid, pa.SumPaidFC, "OUT"); // The origin account has an egress
+        }
+      }
+    }
   }
 
   for (const p of vendorPayments) {
-    const valor = p.TransferSum || p.CashSum || 0;
-    if (!p.DocNum || !p.DocDate || valor === 0) continue;
-    
+    if (!p.DocNum || !p.DocDate) continue;
     if (p.JournalRemarks && norm(p.JournalRemarks) === "CANCELADO") continue;
     if (p.Remarks && norm(p.Remarks) === "CANCELADO") continue;
 
-    let rawCuenta = p.TransferAccount || p.CashAccount || p.Reference1 || p.CardCode;
-    let cuenta = getExactAccountKey(rawCuenta);
-    const override = MANUAL_CUENTA_OVERRIDES[String(p.DocNum)];
-    if (override) cuenta = override;
+    const isGlobalUSD = p.DocCurrency === 'USD' && p.DocRate > 0;
 
+    const addLeg = (rawCuenta: string, localVal: number, fcVal: number | null, overrideTipo: string = "OUT") => {
+      let cuenta = getExactAccountKey(rawCuenta);
+      const override = MANUAL_CUENTA_OVERRIDES[String(p.DocNum)];
+      if (override) cuenta = override;
 
-    docs.push({
-      docNum: String(p.DocNum),
-      date: new Date(p.DocDate),
-      value: valor,
-      tercero: norm(p.U_DescripTercero || p.CardName || p.CardCode),
-      cuenta: normAccount(cuenta),
-      comentario: String(p.JournalRemarks || p.Remarks || ""),
-      tipo: "OUT",
-      infoDetallada: norm(p.U_CodTecero || p.CardCode), 
-      categoria: norm(p.Remarks || p.Reference1),
-      used: false,
-      usedBy: "",
-    });
+      const isMiami = normAccount(cuenta) === normAccount(MIAMI_ACCOUNT);
+      
+      let finalVal = localVal;
+      if (isMiami) {
+        if (fcVal && fcVal > 0) finalVal = fcVal;
+        else if (isGlobalUSD) finalVal = localVal / p.DocRate;
+      }
+      
+      if (finalVal <= 0) return;
+
+      docs.push({
+        docNum: String(p.DocNum),
+        date: new Date(p.DocDate),
+        value: finalVal,
+        tercero: norm(p.U_DescripTercero || p.CardName || p.CardCode),
+        cuenta: normAccount(cuenta),
+        comentario: String(p.JournalRemarks || p.Remarks || ""),
+        tipo: overrideTipo as "IN" | "OUT",
+        infoDetallada: norm(p.U_CodTecero || p.CardCode), 
+        categoria: norm(p.Remarks || p.Reference1),
+        used: false,
+        usedBy: "",
+      });
+    };
+
+    const mainAcc = p.TransferAccount || p.CashAccount;
+    if (mainAcc) {
+      const mainVal = p.TransferSum || p.CashSum || 0;
+      addLeg(mainAcc, mainVal, null, "OUT");
+    }
+
+    if (p.PaymentAccounts && p.PaymentAccounts.length > 0) {
+      for (const pa of p.PaymentAccounts) {
+        if (pa.AccountCode && pa.SumPaid) {
+          addLeg(pa.AccountCode, pa.SumPaid, pa.SumPaidFC, "IN"); // The destination account has an ingress
+        }
+      }
+    }
   }
 
   return docs;

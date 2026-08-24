@@ -26,19 +26,20 @@ function getTargetDates() {
   ];
   
   const dates = [];
+  let minOffset = -1;
+
   if (todayBogotaStr === 'Mon') {
-    dates.push(getBogotaDate(-3));
-    dates.push(getBogotaDate(-2));
-    dates.push(getBogotaDate(-1));
+    minOffset = -3;
   } else if (todayBogotaStr === 'Tue' && HOLIDAYS.includes(yesterdayBogotaStr)) {
-    // Si hoy es martes y ayer fue lunes festivo, traemos viernes, sábado, domingo y lunes festivo
-    dates.push(getBogotaDate(-4)); // viernes
-    dates.push(getBogotaDate(-3)); // sábado
-    dates.push(getBogotaDate(-2)); // domingo
-    dates.push(getBogotaDate(-1)); // lunes
-  } else {
-    dates.push(getBogotaDate(-1));
+    minOffset = -4;
   }
+
+  // Ampliamos la ventana de búsqueda en SAP:
+  // Desde 15 días antes del minOffset, hasta hoy (0)
+  for (let offset = minOffset - 15; offset <= 0; offset++) {
+    dates.push(getBogotaDate(offset));
+  }
+  
   return dates;
 }
 
@@ -64,7 +65,7 @@ export default async function Home() {
     const filterStr = dates.map(d => `DocDate eq '${d}'`).join(' or ');
     
     // 1. Fetch Pagos recibidos (IncomingPayments)
-    let nextLink: string | null = `/IncomingPayments?$filter=${filterStr}`;
+    let nextLink: string | null = `/IncomingPayments?$filter=${filterStr}&$orderby=DocNum`;
     while (nextLink) {
       const res = await sapClient.request(nextLink);
       if (res.ok) {
@@ -90,7 +91,7 @@ export default async function Home() {
     }
 
     // 2. Fetch Pagos efectuados (VendorPayments)
-    let vendorNextLink: string | null = `/VendorPayments?$filter=${filterStr}`;
+    let vendorNextLink: string | null = `/VendorPayments?$filter=${filterStr}&$orderby=DocNum`;
     while (vendorNextLink) {
       const res = await sapClient.request(vendorNextLink);
       if (res.ok) {

@@ -11,33 +11,67 @@ export default async function LiveReconciliation({
   sapPayments: any[];
   vendorPayments: any[];
 }) {
-  // Almacenamos el DocNum, el valor, fecha y si es en USD
-  const bankMap = new Map<string, { docNum: number, value: number, isUSD: boolean, date: Date }[]>();
+  // Almacenamos el DocNum, el valor, fecha, si es en USD, y tipo (IN/OUT)
+  const bankMap = new Map<string, { docNum: number, value: number, isUSD: boolean, date: Date, tipo: "IN" | "OUT" }[]>();
 
-  const processPayment = (payment: any) => {
-    const acc = payment.TransferAccount || payment.CashAccount;
-    if (!acc) return;
-    const override = MANUAL_CUENTA_OVERRIDES[String(payment.DocNum)];
-    const bankName = override || TRANSFER_ACCOUNT_NAMES[acc] || acc;
-    if (!bankMap.has(bankName)) {
-      bankMap.set(bankName, []);
-    }
-    if (payment.DocNum) {
-      const val = payment.TransferSum || payment.CashSum || 0;
-      const isUSD = payment.DocCurrency === 'USD' && payment.DocRate > 0;
-      const finalVal = isUSD ? (val / payment.DocRate) : val;
+  const processPayment = (payment: any, isIncoming: boolean) => {
+    if (!payment.DocNum) return;
+
+    const isGlobalUSD = payment.DocCurrency === 'USD' && payment.DocRate > 0;
+
+    // Función auxiliar para agregar el leg (pata) del movimiento
+    const addLeg = (accountCode: string, localVal: number, fcVal: number | null, legTipo: "IN" | "OUT", bankNameOverride?: string) => {
+      const bankName = bankNameOverride || TRANSFER_ACCOUNT_NAMES[accountCode] || accountCode;
+      if (!bankMap.has(bankName)) {
+        bankMap.set(bankName, []);
+      }
       
-      bankMap.get(bankName)!.push({
-        docNum: payment.DocNum,
-        value: finalVal,
-        isUSD: isUSD,
-        date: new Date(payment.DocDate)
-      });
+      const isMiami = bankName.includes("MIAMI");
+      
+      let finalVal = localVal;
+      let finalIsUSD = false;
+      
+      if (isMiami) {
+        if (fcVal && fcVal > 0) {
+           finalVal = fcVal;
+           finalIsUSD = true;
+        } else if (isGlobalUSD) {
+           finalVal = localVal / payment.DocRate;
+           finalIsUSD = true;
+        }
+      }
+      
+      if (finalVal > 0) {
+        bankMap.get(bankName)!.push({
+          docNum: payment.DocNum,
+          value: finalVal,
+          isUSD: finalIsUSD,
+          date: new Date(payment.DocDate),
+          tipo: legTipo
+        });
+      }
+    };
+
+    // 1. Procesar la cuenta principal
+    const mainAcc = payment.TransferAccount || payment.CashAccount;
+    if (mainAcc) {
+      const mainVal = payment.TransferSum || payment.CashSum || 0;
+      const bankNameOverride = MANUAL_CUENTA_OVERRIDES[String(payment.DocNum)];
+      addLeg(mainAcc, mainVal, null, isIncoming ? "IN" : "OUT", bankNameOverride);
+    }
+
+    // 2. Procesar las líneas de pago adicionales
+    if (payment.PaymentAccounts && payment.PaymentAccounts.length > 0) {
+      for (const pa of payment.PaymentAccounts) {
+        if (pa.AccountCode && pa.SumPaid) {
+           addLeg(pa.AccountCode, pa.SumPaid, pa.SumPaidFC, isIncoming ? "OUT" : "IN");
+        }
+      }
     }
   };
 
-  sapPayments.forEach(processPayment);
-  vendorPayments.forEach(processPayment);
+  sapPayments.forEach(p => processPayment(p, true));
+  vendorPayments.forEach(p => processPayment(p, false));
 
   let filesInSharepoint: string[] = [];
   try {
@@ -133,8 +167,20 @@ export default async function LiveReconciliation({
     // Pass 1: Individual matches
     for (const doc of docs) {
       if (fileMoves.length > 0) {
-        const match = fileMoves.find(m => !usedBankMoves.has(m) && Math.abs(m.value - doc.value) < 1);
-        if (match) {
+        // Encontrar candidatos con el mismo valor y una diferencia de fecha de max 10 días
+        const candidates = fileMoves.filter(m => 
+          !usedBankMoves.has(m) && 
+          m.tipo === doc.tipo &&
+          Math.abs(m.value - doc.value) < 1 &&
+          Math.abs(m.date.getTime() - doc.date.getTime()) <= 10 * 24 * 60 * 60 * 1000
+        );
+
+        if (candidates.length > 0) {
+          // Ordenar por cercanía de fecha
+          candidates.sort((a, b) => 
+            Math.abs(a.date.getTime() - doc.date.getTime()) - Math.abs(b.date.getTime() - doc.date.getTime())
+          );
+          const match = candidates[0];
           usedDocs.add(doc.docNum);
           usedBankMoves.add(match);
           const isFilled = match.docValue !== null && match.docValue !== undefined && match.docValue !== "";
@@ -182,7 +228,9 @@ export default async function LiveReconciliation({
 
          for (const m of unusedBankMoves) {
             for (const { combo, sum } of allCombos) {
-                if (Math.abs(sum - m.value) < 1) {
+                // Verificar que todos los docs del combo tienen el mismo tipo que el movimiento bancario
+                const sameTipo = combo.every((d: any) => d.tipo === m.tipo);
+                if (sameTipo && Math.abs(sum - m.value) < 1 && Math.abs(combo[0].date.getTime() - m.date.getTime()) <= 10 * 24 * 60 * 60 * 1000) {
                     return { combo, m };
                 }
             }
