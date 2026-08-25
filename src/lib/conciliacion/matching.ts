@@ -24,7 +24,8 @@ export function findCandidates(
   tipo: MovTipo,
   cuenta: string | string[],
   valor: number,
-  fecha: Date
+  fecha: Date,
+  toleranceDays: number = DATE_TOLERANCE_DAYS
 ): [SapDoc[], MatchHow | null] {
   const allowed = new Set(typeof cuenta === "string" ? [cuenta] : cuenta);
   const sameValue = pool.filter(
@@ -34,7 +35,7 @@ export function findCandidates(
 
   if (sameValue.length === 1) {
     const diff = Math.abs(daysBetween(sameValue[0].date, fecha));
-    const how: MatchHow = diff === 0 ? "exacta" : diff <= DATE_TOLERANCE_DAYS ? "tolerancia" : "valor_unico";
+    const how: MatchHow = diff === 0 ? "exacta" : diff <= toleranceDays ? "tolerancia" : "valor_unico";
     return [sameValue, how];
   }
 
@@ -42,12 +43,12 @@ export function findCandidates(
   const bestDiff = Math.abs(daysBetween(sameValue[0].date, fecha));
   const secondDiff = Math.abs(daysBetween(sameValue[1].date, fecha));
   if (bestDiff < secondDiff) {
-    const how: MatchHow = bestDiff === 0 ? "exacta" : bestDiff <= DATE_TOLERANCE_DAYS ? "tolerancia" : "mas_cercano";
+    const how: MatchHow = bestDiff === 0 ? "exacta" : bestDiff <= toleranceDays ? "tolerancia" : "mas_cercano";
     return [[sameValue[0]], how];
   }
 
   const tied = sameValue.filter((d) => Math.abs(daysBetween(d.date, fecha)) === bestDiff);
-  const how: MatchHow = bestDiff <= DATE_TOLERANCE_DAYS ? "ambiguo_fecha" : "ambiguo_lejano";
+  const how: MatchHow = bestDiff <= toleranceDays ? "ambiguo_fecha" : "ambiguo_lejano";
   return [tied, how];
 }
 
@@ -119,10 +120,11 @@ export function tryMultiMatchNoCode(
   cuenta: string | string[],
   valor: number,
   fecha: Date,
-  maxComboSize = 4
+  maxComboSize = 4,
+  toleranceDays: number = DATE_TOLERANCE_DAYS
 ): SapDoc[] | null {
   const candidates = pool.filter(
-    (d) => !d.used && d.tipo === tipo && d.cuenta === cuenta && Math.abs(daysBetween(d.date, fecha)) <= DATE_TOLERANCE_DAYS
+    (d) => !d.used && d.tipo === tipo && d.cuenta === cuenta && Math.abs(daysBetween(d.date, fecha)) <= toleranceDays
   );
   if (candidates.length < 2) return null;
 

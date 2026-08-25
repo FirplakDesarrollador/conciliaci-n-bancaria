@@ -3,6 +3,14 @@
 // primero fecha EXACTA; si no hay match, se amplía a esta tolerancia.
 export const DATE_TOLERANCE_DAYS = 3;
 
+// En Banco de Bogotá es normal que el cliente pague con tarjeta débito o
+// crédito: SAP registra el "pago recibido" el día de la venta, pero el banco
+// solo refleja el depósito varios días después (liquidación de la
+// franquicia/datáfono). Esa diferencia supera con frecuencia
+// DATE_TOLERANCE_DAYS, dejando el recibo como "SIN DOCUMENTO" aunque sea
+// válido. Se usa una tolerancia más amplia solo para esta cuenta.
+export const BOGOTA_CARD_DATE_TOLERANCE_DAYS = 8;
+
 // Tolerancia de valor (cuentas en pesos, 1 peso).
 export const VALUE_TOLERANCE = 1.0;
 
@@ -76,11 +84,17 @@ export const MANUAL_CUENTA_OVERRIDES: Record<string, string> = {
   // Enlace Operativo S.A., $2.647.400, 5-jun) realmente se hizo desde
   // Bancolombia.
   "20042394": "BANCOL.CTE # 008-927404-01",
-  // El 80816 (18-ago) es un traslado de Bancolombia hacia la Fiducia: SAP
-  // registra en TransferAccount la cuenta contable de la Fiducia (12450505,
-  // que ni siquiera está en TRANSFER_ACCOUNT_NAMES), pero el movimiento real
-  // a conciliar es el débito que sale de Bancolombia.
+  // El 80816 (18-ago), 80903, 80904 y 80905 (20-ago) son traslados de
+  // Bancolombia hacia la Fiducia: SAP registra en TransferAccount la cuenta
+  // contable de la Fiducia (12450505, que ni siquiera está en
+  // TRANSFER_ACCOUNT_NAMES), pero el movimiento real a conciliar es el
+  // débito que sale de Bancolombia. (En el flujo del informe/Excel esto es
+  // necesario porque no hay lógica de PaymentAccounts/legs; en el live
+  // reconciliation del inicio ya no hace falta, ver live-reconciliation.tsx.)
   "80816": "BANCOL.CTE # 008-927404-01",
+  "80903": "BANCOL.CTE # 008-927404-01",
+  "80904": "BANCOL.CTE # 008-927404-01",
+  "80905": "BANCOL.CTE # 008-927404-01",
 };
 
 // Cuenta de compensación en Miami: opera en USD, a diferencia de las demás

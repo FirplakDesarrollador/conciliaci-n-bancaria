@@ -56,7 +56,12 @@ export default async function LiveReconciliation({
     const mainAcc = payment.TransferAccount || payment.CashAccount;
     if (mainAcc) {
       const mainVal = payment.TransferSum || payment.CashSum || 0;
-      const bankNameOverride = MANUAL_CUENTA_OVERRIDES[String(payment.DocNum)];
+      const hasPaymentAccounts = payment.PaymentAccounts && payment.PaymentAccounts.length > 0;
+      // Si SAP ya trae las líneas de PaymentAccounts (ej. traslados a
+      // Fiducia), esas líneas son la pata real contra la cual concilia el
+      // banco; forzar el override aquí también duplicaría el documento con
+      // un leg fantasma (IN) que nunca va a cruzar contra ningún movimiento.
+      const bankNameOverride = hasPaymentAccounts ? undefined : MANUAL_CUENTA_OVERRIDES[String(payment.DocNum)];
       addLeg(mainAcc, mainVal, null, isIncoming ? "IN" : "OUT", bankNameOverride);
     }
 
@@ -150,7 +155,15 @@ export default async function LiveReconciliation({
       if (filesInSharepoint.includes(configInfo.file)) {
         status = "ENCONTRADO EN SHAREPOINT";
         statusColor = "bg-emerald-100 text-emerald-800 border-emerald-200";
-        fileMoves = bankMovements.get(configInfo.file) || [];
+        // Solo se ofrecen como candidatas las filas que AÚN no tienen un
+        // número de documento escrito en el Excel. Si no se excluyen aquí,
+        // una fila ya conciliada en una corrida anterior puede volver a
+        // "matchear" contra un documento SAP distinto de otro día que
+        // coincida en valor (ej. anticipos redondos que se repiten), dejando
+        // el mismo documento SAP asociado a dos movimientos con fechas
+        // distintas.
+        const allMoves = bankMovements.get(configInfo.file) || [];
+        fileMoves = allMoves.filter((m) => m.docValue === null || m.docValue === undefined || m.docValue === "");
       } else {
         status = "FALTA EXCEL EN SHAREPOINT";
         statusColor = "bg-amber-100 text-amber-800 border-amber-200";

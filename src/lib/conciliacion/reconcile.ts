@@ -1,5 +1,5 @@
 import ExcelJS from "exceljs";
-import { ACCOUNT_MAP, FILL_AMBIGUOUS, FILL_MATCHED, FILL_NO_MATCH } from "./config";
+import { ACCOUNT_MAP, BOGOTA_CARD_DATE_TOLERANCE_DAYS, FILL_AMBIGUOUS, FILL_MATCHED, FILL_NO_MATCH } from "./config";
 import { setComment, setFill } from "./excel-helpers";
 import {
   applyCountMatching,
@@ -117,10 +117,17 @@ export async function reconcileDocs(pool: SapDoc[], bankBuffers: Map<string, Buf
           poolForMatch = pool.filter((d) => d.tercero.includes(tf));
         }
 
+        // En Banco de Bogotá los pagos con tarjeta débito/crédito son
+        // normales: SAP registra el recibo el día de la venta, pero el banco
+        // solo refleja el depósito varios días después. Se usa una
+        // tolerancia de fecha más amplia solo para esta cuenta.
+        const toleranceDays =
+          accountKey === "BANCO DE BOGOTA # 406007252" ? BOGOTA_CARD_DATE_TOLERANCE_DAYS : undefined;
+
         // Una suma de recibos EXACTAMENTE del mismo día es más confiable que
         // un documento individual de otro día, así que se intenta primero.
         const sameDayCombo = tryMultiMatch(poolForMatch, mv.tipo, cuentaForMatch, mv.value, mv.date, 0);
-        const [candidates, how] = findCandidates(poolForMatch, mv.tipo, cuentaForMatch, mv.value, mv.date);
+        const [candidates, how] = findCandidates(poolForMatch, mv.tipo, cuentaForMatch, mv.value, mv.date, toleranceDays);
         const cell = ws.getRow(mv.row).getCell(mv.docCol);
 
         if (sameDayCombo && !(candidates.length === 1 && how === "exacta")) {
@@ -156,7 +163,7 @@ export async function reconcileDocs(pool: SapDoc[], bankBuffers: Map<string, Buf
             continue;
           }
 
-          const combo2 = tryMultiMatchNoCode(poolForMatch, mv.tipo, cuentaForMatch, mv.value, mv.date);
+          const combo2 = tryMultiMatchNoCode(poolForMatch, mv.tipo, cuentaForMatch, mv.value, mv.date, 4, toleranceDays);
           if (combo2) {
             for (const d of combo2) {
               d.used = true;
