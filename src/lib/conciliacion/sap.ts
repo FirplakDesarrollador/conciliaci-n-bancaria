@@ -174,20 +174,26 @@ export function convertApiToSapDocs(incomingPayments: any[], vendorPayments: any
     if (p.Remarks && norm(p.Remarks) === "CANCELADO") continue;
 
     const isGlobalUSD = p.DocCurrency === 'USD' && p.DocRate > 0;
+    const hasPaymentAccounts = p.PaymentAccounts && p.PaymentAccounts.length > 0;
 
-    const addLeg = (rawCuenta: string, localVal: number, fcVal: number | null, overrideTipo: string = "IN") => {
+    const addLeg = (rawCuenta: string, localVal: number, fcVal: number | null, overrideTipo: string = "IN", applyOverride = true) => {
       let cuenta = getExactAccountKey(rawCuenta);
-      const override = MANUAL_CUENTA_OVERRIDES[String(p.DocNum)];
+      // Si SAP ya trae las líneas de PaymentAccounts (ej. traslados a
+      // Fiducia), esas líneas son la pata real contra la cual concilia el
+      // banco; forzar el override también en la pata principal duplicaría
+      // el documento con un leg fantasma que nunca cruza contra ningún
+      // movimiento.
+      const override = applyOverride ? MANUAL_CUENTA_OVERRIDES[String(p.DocNum)] : undefined;
       if (override) cuenta = override;
 
       const isMiami = normAccount(cuenta) === normAccount(MIAMI_ACCOUNT);
-      
+
       let finalVal = localVal;
       if (isMiami) {
         if (fcVal && fcVal > 0) finalVal = fcVal;
         else if (isGlobalUSD) finalVal = localVal / p.DocRate;
       }
-      
+
       if (finalVal <= 0) return;
 
       docs.push({
@@ -208,7 +214,7 @@ export function convertApiToSapDocs(incomingPayments: any[], vendorPayments: any
     const mainAcc = p.TransferAccount || p.CashAccount;
     if (mainAcc) {
       const mainVal = p.TransferSum || p.CashSum || 0;
-      addLeg(mainAcc, mainVal, null, "IN");
+      addLeg(mainAcc, mainVal, null, "IN", !hasPaymentAccounts);
     }
 
     if (p.PaymentAccounts && p.PaymentAccounts.length > 0) {
@@ -226,20 +232,21 @@ export function convertApiToSapDocs(incomingPayments: any[], vendorPayments: any
     if (p.Remarks && norm(p.Remarks) === "CANCELADO") continue;
 
     const isGlobalUSD = p.DocCurrency === 'USD' && p.DocRate > 0;
+    const hasPaymentAccounts = p.PaymentAccounts && p.PaymentAccounts.length > 0;
 
-    const addLeg = (rawCuenta: string, localVal: number, fcVal: number | null, overrideTipo: string = "OUT") => {
+    const addLeg = (rawCuenta: string, localVal: number, fcVal: number | null, overrideTipo: string = "OUT", applyOverride = true) => {
       let cuenta = getExactAccountKey(rawCuenta);
-      const override = MANUAL_CUENTA_OVERRIDES[String(p.DocNum)];
+      const override = applyOverride ? MANUAL_CUENTA_OVERRIDES[String(p.DocNum)] : undefined;
       if (override) cuenta = override;
 
       const isMiami = normAccount(cuenta) === normAccount(MIAMI_ACCOUNT);
-      
+
       let finalVal = localVal;
       if (isMiami) {
         if (fcVal && fcVal > 0) finalVal = fcVal;
         else if (isGlobalUSD) finalVal = localVal / p.DocRate;
       }
-      
+
       if (finalVal <= 0) return;
 
       docs.push({
@@ -250,7 +257,7 @@ export function convertApiToSapDocs(incomingPayments: any[], vendorPayments: any
         cuenta: normAccount(cuenta),
         comentario: String(p.JournalRemarks || p.Remarks || ""),
         tipo: overrideTipo as "IN" | "OUT",
-        infoDetallada: norm(p.U_CodTecero || p.CardCode), 
+        infoDetallada: norm(p.U_CodTecero || p.CardCode),
         categoria: norm(p.Remarks || p.Reference1),
         used: false,
         usedBy: "",
@@ -260,7 +267,7 @@ export function convertApiToSapDocs(incomingPayments: any[], vendorPayments: any
     const mainAcc = p.TransferAccount || p.CashAccount;
     if (mainAcc) {
       const mainVal = p.TransferSum || p.CashSum || 0;
-      addLeg(mainAcc, mainVal, null, "OUT");
+      addLeg(mainAcc, mainVal, null, "OUT", !hasPaymentAccounts);
     }
 
     if (p.PaymentAccounts && p.PaymentAccounts.length > 0) {

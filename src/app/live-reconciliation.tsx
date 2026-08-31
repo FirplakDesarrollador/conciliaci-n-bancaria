@@ -209,6 +209,37 @@ export default async function LiveReconciliation({
       }
     }
 
+    // Pass 1.5: Valor único, sin límite de fecha. Un recibo a veces se
+    // elabora en SAP muchos días después del movimiento real en el banco
+    // (o, al revés, el banco liquida un pago con tarjeta días después de
+    // que SAP registra el recibo) — más allá de los 10 días de la Pass 1.
+    // Si, ignorando la fecha, queda exactamente UN documento sin usar de
+    // este valor+tipo y exactamente UN movimiento bancario sin usar del
+    // mismo valor+tipo, no hay ambigüedad posible y se asume que son el
+    // mismo, sin importar qué tan lejos esté la fecha.
+    for (const doc of docs) {
+      if (usedDocs.has(doc.docNum)) continue;
+      if (fileMoves.length === 0) continue;
+
+      const sameValueDocs = docs.filter(d => !usedDocs.has(d.docNum) && d.tipo === doc.tipo && Math.abs(d.value - doc.value) < 1);
+      const sameValueMoves = fileMoves.filter(m => !usedBankMoves.has(m) && m.tipo === doc.tipo && Math.abs(m.value - doc.value) < 1);
+
+      if (sameValueDocs.length === 1 && sameValueMoves.length === 1) {
+        const match = sameValueMoves[0];
+        usedDocs.add(doc.docNum);
+        usedBankMoves.add(match);
+        const isFilled = match.docValue !== null && match.docValue !== undefined && match.docValue !== "";
+        processedDocs.push({
+            isCombo: false, docs: [doc], value: doc.value, isMatch: true,
+            date: doc.date, isUSD: doc.isUSD, isFilled,
+            excelFile: configInfo ? configInfo.file : undefined,
+            sheetName: match.sheet,
+            excelRow: match.row,
+            excelCol: match.docCol
+        });
+      }
+    }
+
     // Pass 2: Combo matches (size 2 to 3)
     const unusedDocs = docs.filter(d => !usedDocs.has(d.docNum));
     const unusedBankMoves = fileMoves.filter(m => !usedBankMoves.has(m));
