@@ -41,6 +41,14 @@ function isEmptyDoc(v: unknown): boolean {
   return v === null || v === undefined || v === "";
 }
 
+// Una celda con documento ya puede traer un solo # o una combinación
+// ("81073, 81074", "81216-81217"); se extraen todos los números que
+// contenga para poder marcar esos documentos como usados.
+function extractDocNums(v: unknown): string[] {
+  if (isEmptyDoc(v)) return [];
+  return String(v).match(/\d+/g) ?? [];
+}
+
 export async function reconcile({ sapBuffer, bankBuffers }: ReconcileInput): Promise<ReconcileOutput> {
   const pool = await loadSapDocs(sapBuffer);
   return reconcileDocs(pool, bankBuffers);
@@ -103,6 +111,19 @@ export async function reconcileDocs(pool: SapDoc[], bankBuffers: Map<string, Buf
         if (resolvedRows.has(mv.row)) continue;
         if (!isEmptyDoc(mv.docValue)) {
           stats.yaTeniaDocumento++;
+          // Esta fila ya tiene documento(s) asignado(s) de una corrida
+          // anterior. Si no se marcan como usados aquí, quedan disponibles
+          // en el pool y, si existe OTRO movimiento del mismo valor más
+          // adelante en esta misma corrida (un valor que se repite, ej. un
+          // anticipo redondo), el mismo documento SAP se le vuelve a asignar
+          // a ese segundo movimiento — quedando relacionado dos veces.
+          const referencedDocNums = extractDocNums(mv.docValue);
+          for (const d of pool) {
+            if (!d.used && referencedDocNums.includes(d.docNum)) {
+              d.used = true;
+              d.usedBy = `${fname}!${ws.name}!R${mv.row}`;
+            }
+          }
           continue;
         }
         if (isBankFee(mv.refText)) {
