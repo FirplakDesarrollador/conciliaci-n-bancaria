@@ -271,8 +271,15 @@ export default async function LiveReconciliation({
     // Pass 2: Combo matches (size 2 to 3)
     const unusedDocs = docs.filter(d => !usedDocs.has(d.docNum));
     const unusedBankMoves = fileMoves.filter(m => !usedBankMoves.has(m));
-    
-    if (unusedDocs.length > 0 && unusedDocs.length <= 50 && unusedBankMoves.length > 0) {
+
+    // Antes el límite era 50 y las combinaciones se recalculaban desde cero
+    // en cada vuelta del while (mucho más lento cuanto más grande el
+    // límite). Ahora se calculan UNA sola vez y cada vuelta solo filtra
+    // cuáles siguen sin usar, así que se puede subir el límite sin que el
+    // tiempo de cómputo se dispare.
+    const MAX_COMBO_DOCS = 150;
+
+    if (unusedDocs.length > 0 && unusedDocs.length <= MAX_COMBO_DOCS && unusedBankMoves.length > 0) {
       const getCombinations = function* (elements: any[], length: number): IterableIterator<any[]> {
         if (length === 1) {
           for (const el of elements) yield [el];
@@ -287,19 +294,19 @@ export default async function LiveReconciliation({
         }
       };
 
-      const findComboMatch = () => {
-         const allCombos = [];
-         for (let size = 2; size <= Math.min(3, unusedDocs.length); size++) {
-            for (const combo of getCombinations(unusedDocs, size)) {
-                allCombos.push({
-                    combo,
-                    sum: combo.reduce((acc: number, d: any) => acc + d.value, 0)
-                });
-            }
-         }
+      const allCombos: { combo: any[]; sum: number }[] = [];
+      for (let size = 2; size <= Math.min(3, unusedDocs.length); size++) {
+        for (const combo of getCombinations(unusedDocs, size)) {
+          allCombos.push({ combo, sum: combo.reduce((acc: number, d: any) => acc + d.value, 0) });
+        }
+      }
 
+      const usedInCombo = new Set<number>();
+      const findComboMatch = () => {
          for (const m of unusedBankMoves) {
+            if (usedBankMoves.has(m)) continue;
             for (const { combo, sum } of allCombos) {
+                if (combo.some((d: any) => usedInCombo.has(d.docNum))) continue;
                 // Verificar que todos los docs del combo tienen el mismo tipo
                 // que el movimiento bancario y caen en el mismo mes calendario
                 // (no se suman documentos de un mes ya cerrado).
@@ -316,15 +323,8 @@ export default async function LiveReconciliation({
       let comboMatch = findComboMatch();
       while (comboMatch) {
          const { combo, m } = comboMatch;
-         combo.forEach(d => usedDocs.add(d.docNum));
+         combo.forEach(d => { usedDocs.add(d.docNum); usedInCombo.add(d.docNum); });
          usedBankMoves.add(m);
-         
-         combo.forEach(d => {
-           const idx = unusedDocs.findIndex(ud => ud.docNum === d.docNum);
-           if (idx !== -1) unusedDocs.splice(idx, 1);
-         });
-         const idxM = unusedBankMoves.indexOf(m);
-         if (idxM !== -1) unusedBankMoves.splice(idxM, 1);
 
          const isFilled = m.docValue !== null && m.docValue !== undefined && m.docValue !== "";
          processedDocs.push({
@@ -345,9 +345,12 @@ export default async function LiveReconciliation({
       }
     }
 
-    // Pass 3: Unmatched remaining
-    for (const doc of unusedDocs) {
-        processedDocs.push({ isCombo: false, docs: [doc], value: doc.value, isMatch: false, date: doc.date, isUSD: doc.isUSD, isFilled: false });
+    // Pass 3: Unmatched remaining. Se recalcula desde `docs` filtrando por
+    // usedDocs (la fuente de verdad actualizada por todas las pasadas)
+    // en vez de reusar el arreglo unusedDocs, que ya no se muta in-place.
+    for (const doc of docs) {
+      if (usedDocs.has(doc.docNum)) continue;
+      processedDocs.push({ isCombo: false, docs: [doc], value: doc.value, isMatch: false, date: doc.date, isUSD: doc.isUSD, isFilled: false });
     }
 
     return { bank, docs: processedDocs, status, statusColor };
