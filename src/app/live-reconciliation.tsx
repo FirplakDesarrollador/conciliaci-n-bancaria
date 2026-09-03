@@ -85,8 +85,20 @@ export default async function LiveReconciliation({
     console.error("Error fetching sharepoint files:", error);
   }
 
-  const normalizeStr = (s: string) => 
+  const normalizeStr = (s: string) =>
     s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^A-Z0-9]/gi, "").toUpperCase();
+
+  const sameMonth = (a: Date, b: Date) =>
+    a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth();
+
+  // Una celda con documento ya puede traer un solo numero o una combinacion
+  // ("81073, 81074", "81216-81217"); se extraen todos los numeros que
+  // contenga para poder marcar esos documentos como usados.
+  const extractDocNums = (v: unknown): number[] => {
+    if (v === null || v === undefined || v === "") return [];
+    const matches = String(v).match(/\d+/g);
+    return matches ? matches.map(Number) : [];
+  };
 
   // 1. Identificar qué archivos necesitamos descargar y procesar
   const filesToDownload = new Set<string>();
@@ -150,7 +162,8 @@ export default async function LiveReconciliation({
     let statusColor = "bg-slate-100 text-slate-800";
     let fileMoves: any[] = [];
     const configInfo = accountEntry ? accountEntry[1] : undefined;
-    
+    const preUsedDocNums = new Set<number>();
+
     if (accountEntry) {
       if (filesInSharepoint.includes(configInfo.file)) {
         status = "ENCONTRADO EN SHAREPOINT";
@@ -163,7 +176,17 @@ export default async function LiveReconciliation({
         // el mismo documento SAP asociado a dos movimientos con fechas
         // distintas.
         const allMoves = bankMovements.get(configInfo.file) || [];
-        fileMoves = allMoves.filter((m) => m.docValue === null || m.docValue === undefined || m.docValue === "");
+        const isEmptyMove = (m: any) => m.docValue === null || m.docValue === undefined || m.docValue === "";
+        fileMoves = allMoves.filter(isEmptyMove);
+        // Las filas que YA tienen documento deben "gastar" ese documento del
+        // pool: si no se marca aquí, el mismo documento (de este mes o de un
+        // mes ya cerrado) sigue disponible y puede terminar asignado también
+        // a otro movimiento con el mismo valor.
+        for (const m of allMoves) {
+          if (!isEmptyMove(m)) {
+            for (const n of extractDocNums(m.docValue)) preUsedDocNums.add(n);
+          }
+        }
       } else {
         status = "FALTA EXCEL EN SHAREPOINT";
         statusColor = "bg-amber-100 text-amber-800 border-amber-200";
@@ -174,17 +197,22 @@ export default async function LiveReconciliation({
     }
 
     const processedDocs: any[] = [];
-    const usedDocs = new Set<number>();
+    const usedDocs = new Set<number>(preUsedDocNums);
     const usedBankMoves = new Set<any>();
 
     // Pass 1: Individual matches
     for (const doc of docs) {
+      if (usedDocs.has(doc.docNum)) continue;
       if (fileMoves.length > 0) {
-        // Encontrar candidatos con el mismo valor y una diferencia de fecha de max 10 días
-        const candidates = fileMoves.filter(m => 
-          !usedBankMoves.has(m) && 
+        // Encontrar candidatos con el mismo valor, el mismo mes calendario y
+        // una diferencia de fecha de max 10 días. La restricción de mismo
+        // mes evita que un documento de un mes ya cerrado se cruce contra un
+        // movimiento del mes siguiente solo porque cae dentro de los 10 días.
+        const candidates = fileMoves.filter(m =>
+          !usedBankMoves.has(m) &&
           m.tipo === doc.tipo &&
           Math.abs(m.value - doc.value) < 1 &&
+          sameMonth(m.date, doc.date) &&
           Math.abs(m.date.getTime() - doc.date.getTime()) <= 10 * 24 * 60 * 60 * 1000
         );
 
@@ -209,20 +237,20 @@ export default async function LiveReconciliation({
       }
     }
 
-    // Pass 1.5: Valor único, sin límite de fecha. Un recibo a veces se
-    // elabora en SAP muchos días después del movimiento real en el banco
-    // (o, al revés, el banco liquida un pago con tarjeta días después de
-    // que SAP registra el recibo) — más allá de los 10 días de la Pass 1.
-    // Si, ignorando la fecha, queda exactamente UN documento sin usar de
-    // este valor+tipo y exactamente UN movimiento bancario sin usar del
-    // mismo valor+tipo, no hay ambigüedad posible y se asume que son el
-    // mismo, sin importar qué tan lejos esté la fecha.
+    // Pass 1.5: Valor único, sin límite de días DENTRO del mismo mes. Un
+    // recibo a veces se elabora en SAP varios días después del movimiento
+    // real en el banco (o al revés) — más allá de los 10 días de la Pass 1.
+    // Si, ignorando cuántos días de diferencia hay (pero exigiendo que caigan
+    // en el mismo mes calendario, para no reabrir un mes ya cerrado), queda
+    // exactamente UN documento sin usar de este valor+tipo y exactamente UN
+    // movimiento bancario sin usar del mismo valor+tipo, no hay ambigüedad
+    // posible y se asume que son el mismo.
     for (const doc of docs) {
       if (usedDocs.has(doc.docNum)) continue;
       if (fileMoves.length === 0) continue;
 
       const sameValueDocs = docs.filter(d => !usedDocs.has(d.docNum) && d.tipo === doc.tipo && Math.abs(d.value - doc.value) < 1);
-      const sameValueMoves = fileMoves.filter(m => !usedBankMoves.has(m) && m.tipo === doc.tipo && Math.abs(m.value - doc.value) < 1);
+      const sameValueMoves = fileMoves.filter(m => !usedBankMoves.has(m) && m.tipo === doc.tipo && Math.abs(m.value - doc.value) < 1 && sameMonth(m.date, doc.date));
 
       if (sameValueDocs.length === 1 && sameValueMoves.length === 1) {
         const match = sameValueMoves[0];
@@ -272,9 +300,12 @@ export default async function LiveReconciliation({
 
          for (const m of unusedBankMoves) {
             for (const { combo, sum } of allCombos) {
-                // Verificar que todos los docs del combo tienen el mismo tipo que el movimiento bancario
+                // Verificar que todos los docs del combo tienen el mismo tipo
+                // que el movimiento bancario y caen en el mismo mes calendario
+                // (no se suman documentos de un mes ya cerrado).
                 const sameTipo = combo.every((d: any) => d.tipo === m.tipo);
-                if (sameTipo && Math.abs(sum - m.value) < 1 && Math.abs(combo[0].date.getTime() - m.date.getTime()) <= 10 * 24 * 60 * 60 * 1000) {
+                const sameMonthAsMove = combo.every((d: any) => sameMonth(d.date, m.date));
+                if (sameTipo && sameMonthAsMove && Math.abs(sum - m.value) < 1 && Math.abs(combo[0].date.getTime() - m.date.getTime()) <= 10 * 24 * 60 * 60 * 1000) {
                     return { combo, m };
                 }
             }

@@ -2,7 +2,7 @@ import type ExcelJS from "exceljs";
 import { DATE_TOLERANCE_DAYS, FILL_MATCHED, GROUP_TOTAL_CATEGORIES, MULTI_VALUE_TOLERANCE, VALUE_TOLERANCE } from "./config";
 import { setComment, setFill } from "./excel-helpers";
 import type { BankMove, MovTipo, SapDoc } from "./types";
-import { combinations, daysBetween, infoCode, norm, normAccount, rangeInclusive, sequenceRatio } from "./utils";
+import { combinations, daysBetween, infoCode, norm, normAccount, rangeInclusive, sameMonth, sequenceRatio } from "./utils";
 
 export type MatchHow =
   | "exacta"
@@ -28,8 +28,16 @@ export function findCandidates(
   toleranceDays: number = DATE_TOLERANCE_DAYS
 ): [SapDoc[], MatchHow | null] {
   const allowed = new Set(typeof cuenta === "string" ? [cuenta] : cuenta);
+  // sameMonth evita que un documento de un mes ya cerrado se cruce contra un
+  // movimiento del mes siguiente/anterior, incluso vía el desempate por
+  // "valor único" que de otra forma ignora la distancia en días.
   const sameValue = pool.filter(
-    (d) => !d.used && d.tipo === tipo && allowed.has(d.cuenta) && Math.abs(d.value - valor) <= VALUE_TOLERANCE
+    (d) =>
+      !d.used &&
+      d.tipo === tipo &&
+      allowed.has(d.cuenta) &&
+      Math.abs(d.value - valor) <= VALUE_TOLERANCE &&
+      sameMonth(d.date, fecha)
   );
   if (sameValue.length === 0) return [[], null];
 
@@ -75,6 +83,7 @@ export function tryMultiMatch(
       d.tipo === tipo &&
       allowed.has(d.cuenta) &&
       d.infoDetallada &&
+      sameMonth(d.date, fecha) &&
       Math.abs(daysBetween(d.date, fecha)) <= window
   );
   if (candidates.length < 2) return null;
@@ -124,7 +133,12 @@ export function tryMultiMatchNoCode(
   toleranceDays: number = DATE_TOLERANCE_DAYS
 ): SapDoc[] | null {
   const candidates = pool.filter(
-    (d) => !d.used && d.tipo === tipo && d.cuenta === cuenta && Math.abs(daysBetween(d.date, fecha)) <= toleranceDays
+    (d) =>
+      !d.used &&
+      d.tipo === tipo &&
+      d.cuenta === cuenta &&
+      sameMonth(d.date, fecha) &&
+      Math.abs(daysBetween(d.date, fecha)) <= toleranceDays
   );
   if (candidates.length < 2) return null;
 

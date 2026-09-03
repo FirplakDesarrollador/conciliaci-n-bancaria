@@ -78,6 +78,12 @@ export function daysBetween(a: Date, b: Date): number {
   return Math.round((a.getTime() - b.getTime()) / 86_400_000);
 }
 
+// Un documento de un mes ya cerrado no debe cruzarse contra un movimiento
+// bancario de otro mes solo porque cae dentro de la tolerancia de días.
+export function sameMonth(a: Date, b: Date): boolean {
+  return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth();
+}
+
 export function isBankFee(refText: string): boolean {
   const t = norm(refText);
   return IGNORE_KEYWORDS.some((kw) => t.includes(kw));
