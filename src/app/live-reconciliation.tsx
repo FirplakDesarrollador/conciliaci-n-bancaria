@@ -345,6 +345,89 @@ export default async function LiveReconciliation({
       }
     }
 
+    // Pass 2.5: Combo inverso — un solo documento (ej. un pago de impuestos)
+    // que el banco reparte en varios movimientos con descripcion similar.
+    // Simetrico a la Pass 2, pero la suma es del lado del banco: se agrupan
+    // los movimientos sin usar por las primeras palabras de su descripcion
+    // y se busca una combinacion cuya suma sea igual al valor de algun
+    // documento sin usar (y solo de ese documento, para evitar ambiguedad).
+    {
+      const getCombinationsRev = function* (elements: any[], length: number): IterableIterator<any[]> {
+        if (length === 1) {
+          for (const el of elements) yield [el];
+          return;
+        }
+        for (let i = 0; i <= elements.length - length; i++) {
+          const head = elements.slice(i, i + 1);
+          const tailCombs = getCombinationsRev(elements.slice(i + 1), length - 1);
+          for (const tail of tailCombs) {
+            yield head.concat(tail);
+          }
+        }
+      };
+
+      const MAX_REVERSE_GROUP = 12;
+
+      const findReverseMatch = () => {
+        const remainingMoves = fileMoves.filter(m => !usedBankMoves.has(m));
+        const groups = new Map<string, any[]>();
+        for (const m of remainingMoves) {
+          const prefix = (m.refText || "").split(" ").slice(0, 3).join(" ");
+          if (!prefix) continue;
+          if (!groups.has(prefix)) groups.set(prefix, []);
+          groups.get(prefix)!.push(m);
+        }
+
+        for (const groupMoves of groups.values()) {
+          if (groupMoves.length < 2 || groupMoves.length > MAX_REVERSE_GROUP) continue;
+          const tipo = groupMoves[0].tipo;
+          if (!groupMoves.every(m => m.tipo === tipo)) continue;
+
+          for (let size = 2; size <= groupMoves.length; size++) {
+            for (const combo of getCombinationsRev(groupMoves, size)) {
+              const sum = combo.reduce((acc: number, m: any) => acc + m.value, 0);
+              const matchingDocs = docs.filter((d: any) =>
+                !usedDocs.has(d.docNum) &&
+                d.tipo === tipo &&
+                Math.abs(d.value - sum) < 1 &&
+                sameMonth(d.date, combo[0].date)
+              );
+              if (matchingDocs.length === 1) {
+                return { doc: matchingDocs[0], combo };
+              }
+            }
+          }
+        }
+        return null;
+      };
+
+      let reverseMatch = findReverseMatch();
+      while (reverseMatch) {
+        const { doc, combo } = reverseMatch;
+        usedDocs.add(doc.docNum);
+        combo.forEach((m: any) => usedBankMoves.add(m));
+
+        combo.forEach((m: any) => {
+          const isFilled = m.docValue !== null && m.docValue !== undefined && m.docValue !== "";
+          processedDocs.push({
+            isCombo: false,
+            docs: [doc],
+            value: m.value,
+            isMatch: true,
+            date: doc.date,
+            isUSD: doc.isUSD,
+            isFilled,
+            excelFile: configInfo ? configInfo.file : undefined,
+            sheetName: m.sheet,
+            excelRow: m.row,
+            excelCol: m.docCol
+          });
+        });
+
+        reverseMatch = findReverseMatch();
+      }
+    }
+
     // Pass 3: Unmatched remaining. Se recalcula desde `docs` filtrando por
     // usedDocs (la fuente de verdad actualizada por todas las pasadas)
     // en vez de reusar el arreglo unusedDocs, que ya no se muta in-place.
