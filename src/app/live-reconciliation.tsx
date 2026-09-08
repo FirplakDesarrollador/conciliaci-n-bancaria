@@ -1,4 +1,4 @@
-import { TRANSFER_ACCOUNT_NAMES, ACCOUNT_MAP, MANUAL_CUENTA_OVERRIDES } from "@/lib/conciliacion/config";
+import { TRANSFER_ACCOUNT_NAMES, ACCOUNT_MAP, MANUAL_CUENTA_OVERRIDES, GROUP_TOTAL_CATEGORIES } from "@/lib/conciliacion/config";
 import { listDriveFiles, downloadDriveFile } from "@/lib/graph/sharepoint";
 import ExcelJS from "exceljs";
 import { findHeaderRowAndCols, READERS, REQUIRED_HEADERS_HINT, fixCompensacionDates } from "@/lib/conciliacion/readers";
@@ -11,13 +11,16 @@ export default async function LiveReconciliation({
   sapPayments: any[];
   vendorPayments: any[];
 }) {
-  // Almacenamos el DocNum, el valor, fecha, si es en USD, y tipo (IN/OUT)
-  const bankMap = new Map<string, { docNum: number, value: number, isUSD: boolean, date: Date, tipo: "IN" | "OUT" }[]>();
+  // Almacenamos el DocNum, el valor, fecha, si es en USD, tipo (IN/OUT) y la
+  // categoria (derivada de Remarks, ej. "CAJA MENOR") para el cruce por
+  // categorias conocidas (GROUP_TOTAL_CATEGORIES) mas adelante.
+  const bankMap = new Map<string, { docNum: number, value: number, isUSD: boolean, date: Date, tipo: "IN" | "OUT", categoria: string }[]>();
 
   const processPayment = (payment: any, isIncoming: boolean) => {
     if (!payment.DocNum) return;
 
     const isGlobalUSD = payment.DocCurrency === 'USD' && payment.DocRate > 0;
+    const categoria = String(payment.Remarks || "").toUpperCase().trim();
 
     // Función auxiliar para agregar el leg (pata) del movimiento
     const addLeg = (accountCode: string, localVal: number, fcVal: number | null, legTipo: "IN" | "OUT", bankNameOverride?: string) => {
@@ -47,7 +50,8 @@ export default async function LiveReconciliation({
           value: finalVal,
           isUSD: finalIsUSD,
           date: new Date(payment.DocDate),
-          tipo: legTipo
+          tipo: legTipo,
+          categoria
         });
       }
     };
@@ -425,6 +429,88 @@ export default async function LiveReconciliation({
         });
 
         reverseMatch = findReverseMatch();
+      }
+    }
+
+    // Pass 2.7: Categorias conocidas (GROUP_TOTAL_CATEGORIES) — un grupo de
+    // documentos de una categoria (ej. reembolsos de "CAJA MENOR") financia
+    // en conjunto un grupo de movimientos bancarios con palabras clave
+    // asociadas (ej. "CAJERO"/"RETIRO"), sin correspondencia uno a uno. El
+    // retiro real en el cajero suele ocurrir unos dias despues de que el
+    // reembolso se registra en SAP, por eso se permite una tolerancia de
+    // fecha (a diferencia de un cruce exacto por el mismo dia).
+    {
+      const GROUP_TOTAL_DATE_TOLERANCE_DAYS = 5;
+
+      for (const [categoria, keywords] of Object.entries(GROUP_TOTAL_CATEGORIES)) {
+        const docsByDate = new Map<string, any[]>();
+        for (const doc of docs) {
+          if (usedDocs.has(doc.docNum)) continue;
+          if (doc.categoria !== categoria) continue;
+          const key = doc.date.toISOString().slice(0, 10);
+          if (!docsByDate.has(key)) docsByDate.set(key, []);
+          docsByDate.get(key)!.push(doc);
+        }
+
+        const movesByDate = new Map<string, any[]>();
+        for (const m of fileMoves) {
+          if (usedBankMoves.has(m)) continue;
+          const ref = (m.refText || "").toUpperCase();
+          if (!keywords.some((kw: string) => ref.includes(kw))) continue;
+          const key = m.date.toISOString().slice(0, 10);
+          if (!movesByDate.has(key)) movesByDate.set(key, []);
+          movesByDate.get(key)!.push(m);
+        }
+
+        const usedDocDates = new Set<string>();
+        const usedMoveDates = new Set<string>();
+
+        for (const [docDateKey, docsInDay] of docsByDate) {
+          if (usedDocDates.has(docDateKey)) continue;
+          const docTotal = docsInDay.reduce((s: number, d: any) => s + d.value, 0);
+          const docDateObj = docsInDay[0].date;
+
+          let best: string | null = null;
+          let bestDiff = Infinity;
+          for (const [moveDateKey, movesInDay] of movesByDate) {
+            if (usedMoveDates.has(moveDateKey)) continue;
+            const moveDateObj = movesInDay[0].date;
+            if (!sameMonth(moveDateObj, docDateObj)) continue;
+            const diffDays = Math.abs(moveDateObj.getTime() - docDateObj.getTime()) / (24 * 60 * 60 * 1000);
+            if (diffDays > GROUP_TOTAL_DATE_TOLERANCE_DAYS) continue;
+            const moveTotal = movesInDay.reduce((s: number, m: any) => s + m.value, 0);
+            if (Math.abs(docTotal - moveTotal) >= 1) continue;
+            if (diffDays < bestDiff) {
+              bestDiff = diffDays;
+              best = moveDateKey;
+            }
+          }
+
+          if (best) {
+            const movesInDay = movesByDate.get(best)!;
+            usedDocDates.add(docDateKey);
+            usedMoveDates.add(best);
+            docsInDay.forEach((d: any) => usedDocs.add(d.docNum));
+            movesInDay.forEach((m: any) => usedBankMoves.add(m));
+
+            for (const m of movesInDay) {
+              const isFilled = m.docValue !== null && m.docValue !== undefined && m.docValue !== "";
+              processedDocs.push({
+                isCombo: true,
+                docs: docsInDay,
+                value: m.value,
+                isMatch: true,
+                date: docDateObj,
+                isUSD: docsInDay[0].isUSD,
+                isFilled,
+                excelFile: configInfo ? configInfo.file : undefined,
+                sheetName: m.sheet,
+                excelRow: m.row,
+                excelCol: m.docCol
+              });
+            }
+          }
+        }
       }
     }
 

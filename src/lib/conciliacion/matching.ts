@@ -354,10 +354,13 @@ export function applyReverseCombo(
 }
 
 /**
- * Para categorías conocidas (GROUP_TOTAL_CATEGORIES): agrupa documentos SAP
+ * Para categorias conocidas (GROUP_TOTAL_CATEGORIES): agrupa documentos SAP
  * y movimientos bancarios sin documento por (cuenta, fecha); si el TOTAL de
- * ambos grupos coincide, asigna TODOS los números de documento a CADA
- * movimiento bancario del grupo (no hay correspondencia uno-a-uno clara).
+ * un grupo de documentos de un dia coincide con el total de un grupo de
+ * movimientos de OTRO dia dentro de la tolerancia (el retiro real en el
+ * cajero suele ocurrir unos dias despues de que el reembolso se registra
+ * en SAP), asigna TODOS los numeros de documento a CADA movimiento bancario
+ * del grupo (no hay correspondencia uno-a-uno clara).
  */
 export function applyGroupTotalMatch(
   nomatchMoves: BankMove[],
@@ -365,7 +368,8 @@ export function applyGroupTotalMatch(
   ws: ExcelJS.Worksheet,
   fname: string,
   sheetName: string,
-  accountKey: string
+  accountKey: string,
+  dateToleranceDays: number = 5
 ): { resolvedRows: Set<number>; nAssigned: number } {
   const resolvedRows = new Set<number>();
   let nAssigned = 0;
@@ -391,14 +395,38 @@ export function applyGroupTotalMatch(
       }
     }
 
-    for (const [key, docs] of docsByKey.entries()) {
-      const mvs = movesByKey.get(key);
-      if (!mvs || mvs.length === 0) continue;
+    const usedDocKeys = new Set<string>();
+    const usedMoveKeys = new Set<string>();
+
+    for (const [docKey, docs] of docsByKey.entries()) {
+      if (usedDocKeys.has(docKey)) continue;
+      const [docCuenta, docDateMs] = JSON.parse(docKey) as [string, number];
       const docTotal = docs.reduce((s, d) => s + d.value, 0);
-      const mvTotal = mvs.reduce((s, m) => s + m.value, 0);
-      if (Math.abs(docTotal - mvTotal) > MULTI_VALUE_TOLERANCE) continue;
+
+      let bestMoveKey: string | null = null;
+      let bestDiff = Infinity;
+      for (const [moveKey, mvs] of movesByKey.entries()) {
+        if (usedMoveKeys.has(moveKey)) continue;
+        const [mvCuenta, mvDateMs] = JSON.parse(moveKey) as [string, number];
+        if (normAccount(mvCuenta) !== normAccount(docCuenta)) continue;
+        if (!sameMonth(new Date(mvDateMs), new Date(docDateMs))) continue;
+        const diffDays = Math.abs(mvDateMs - docDateMs) / 86_400_000;
+        if (diffDays > dateToleranceDays) continue;
+        const mvTotal = mvs.reduce((s, m) => s + m.value, 0);
+        if (Math.abs(docTotal - mvTotal) > MULTI_VALUE_TOLERANCE) continue;
+        if (diffDays < bestDiff) {
+          bestDiff = diffDays;
+          bestMoveKey = moveKey;
+        }
+      }
+
+      if (!bestMoveKey) continue;
+      const mvs = movesByKey.get(bestMoveKey)!;
+      usedDocKeys.add(docKey);
+      usedMoveKeys.add(bestMoveKey);
 
       const docNums = docs.map((d) => d.docNum).join(", ");
+      const mvTotal = mvs.reduce((s, m) => s + m.value, 0);
       for (const d of docs) d.used = true;
       for (const mv of mvs) {
         docs[0].usedBy = `${fname}!${sheetName}!R${mv.row}`;
@@ -407,7 +435,7 @@ export function applyGroupTotalMatch(
         setFill(cell, FILL_MATCHED);
         setComment(
           cell,
-          `Categoria '${categoria}': ${docs.length} documentos SAP (${docNums}, total ${docTotal.toFixed(2)}) financian en conjunto ${mvs.length} movimientos bancarios de este mismo dia (total ${mvTotal.toFixed(2)}). No hay correspondencia 1 a 1 clara, se listan todos los documentos en cada movimiento.`
+          `Categoria '${categoria}': ${docs.length} documentos SAP (${docNums}, total ${docTotal.toFixed(2)}) financian en conjunto ${mvs.length} movimientos bancarios (total ${mvTotal.toFixed(2)}), con hasta ${dateToleranceDays} dias de diferencia entre el registro en SAP y el movimiento real. No hay correspondencia 1 a 1 clara, se listan todos los documentos en cada movimiento.`
         );
         resolvedRows.add(mv.row);
         nAssigned++;
