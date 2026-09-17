@@ -1,5 +1,5 @@
 import { TRANSFER_ACCOUNT_NAMES, ACCOUNT_MAP, MANUAL_CUENTA_OVERRIDES, GROUP_TOTAL_CATEGORIES } from "@/lib/conciliacion/config";
-import { listDriveFiles, downloadDriveFile } from "@/lib/graph/sharepoint";
+import { listDriveFiles, downloadDriveFile, updateExcelCellsBatch } from "@/lib/graph/sharepoint";
 import ExcelJS from "exceljs";
 import { findHeaderRowAndCols, READERS, REQUIRED_HEADERS_HINT, fixCompensacionDates } from "@/lib/conciliacion/readers";
 import LiveReconciliationClient from "./live-reconciliation-client";
@@ -524,6 +524,51 @@ export default async function LiveReconciliation({
 
     return { bank, docs: processedDocs, status, statusColor };
   });
+
+  // Auto-sync: a partir del 2026-09-14 este paso deja de depender de que
+  // alguien haga clic en "Sincronizar" en el dashboard. Todo lo que las
+  // pasadas anteriores ya identificaron como match sin ambiguedad
+  // (isMatch=true) y que aun no tiene numero en el Excel (isFilled=false)
+  // se escribe aqui mismo, en cada carga de la pagina, agrupado por archivo.
+  const colToLetter = (columnNumber: number): string => {
+    let temp: number, letter = "";
+    while (columnNumber > 0) {
+      temp = (columnNumber - 1) % 26;
+      letter = String.fromCharCode(temp + 65) + letter;
+      columnNumber = (columnNumber - temp - 1) / 26;
+    }
+    return letter;
+  };
+
+  const itemsByFile = new Map<string, { sheetName: string; cellAddress: string; value: string; color: string; docGroup: any }[]>();
+  for (const bankEntry of bankList) {
+    for (const docGroup of bankEntry.docs) {
+      if (docGroup.isMatch && !docGroup.isFilled && docGroup.excelFile && docGroup.sheetName && docGroup.excelRow && docGroup.excelCol) {
+        const docNumStr = docGroup.docs.map((d: any) => d.docNum).join("-");
+        if (!itemsByFile.has(docGroup.excelFile)) itemsByFile.set(docGroup.excelFile, []);
+        itemsByFile.get(docGroup.excelFile)!.push({
+          sheetName: docGroup.sheetName,
+          cellAddress: `${colToLetter(docGroup.excelCol)}${docGroup.excelRow}`,
+          value: docNumStr,
+          color: "#C6EFCE",
+          docGroup,
+        });
+      }
+    }
+  }
+
+  await Promise.allSettled(Array.from(itemsByFile.entries()).map(async ([fileName, items]) => {
+    try {
+      const res = await updateExcelCellsBatch(fileName, items.map((item) => ({ sheetName: item.sheetName, cellAddress: item.cellAddress, value: item.value, color: item.color })));
+      if (res.success) {
+        for (const item of items) item.docGroup.isFilled = true;
+      } else {
+        console.error(`Auto-sync fallo para ${fileName}:`, res.errors);
+      }
+    } catch (e) {
+      console.error(`Auto-sync excepcion para ${fileName}:`, e);
+    }
+  }));
 
   return (
     <LiveReconciliationClient 
