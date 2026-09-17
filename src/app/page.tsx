@@ -2,46 +2,9 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { logout } from "./login/actions";
-import { sapClient } from "@/lib/sap/service-layer";
 import { Suspense } from "react";
 import LiveReconciliation from "./live-reconciliation";
-import { TRANSFER_ACCOUNT_NAMES } from "@/lib/conciliacion/config";
-
-function getTargetDates() {
-  const now = new Date();
-  const getBogotaDate = (daysOffset: number) => {
-    const d = new Date(now.getTime() + daysOffset * 24 * 60 * 60 * 1000);
-    return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Bogota' }).format(d);
-  };
-  
-  const todayBogotaStr = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Bogota', weekday: 'short' }).format(now);
-  const yesterdayBogotaStr = getBogotaDate(-1);
-
-  // Días festivos para Colombia (YYYY-MM-DD)
-  const HOLIDAYS = [
-    '2026-01-01', '2026-01-12', '2026-03-23', '2026-04-02', '2026-04-03',
-    '2026-05-01', '2026-05-18', '2026-06-08', '2026-06-15', '2026-06-29',
-    '2026-07-13', '2026-07-20', '2026-08-07', '2026-08-17', '2026-10-12',
-    '2026-11-02', '2026-11-16', '2026-12-08', '2026-12-25'
-  ];
-  
-  const dates = [];
-  let minOffset = -1;
-
-  if (todayBogotaStr === 'Mon') {
-    minOffset = -3;
-  } else if (todayBogotaStr === 'Tue' && HOLIDAYS.includes(yesterdayBogotaStr)) {
-    minOffset = -4;
-  }
-
-  // Ampliamos la ventana de búsqueda en SAP:
-  // Desde 15 días antes del minOffset, hasta hoy (0)
-  for (let offset = minOffset - 15; offset <= 0; offset++) {
-    dates.push(getBogotaDate(offset));
-  }
-  
-  return dates;
-}
+import { fetchSapPayments } from "@/lib/conciliacion/fetch-sap-payments";
 
 export default async function Home() {
   const supabase = await createClient();
@@ -53,75 +16,7 @@ export default async function Home() {
     redirect("/login");
   }
 
-  const dates = getTargetDates();
-  
-  let sapPayments: any[] = [];
-  let errorMessage: string | null = null;
-  
-  let vendorPayments: any[] = [];
-  let vendorErrorMessage: string | null = null;
-  
-  try {
-    const filterStr = dates.map(d => `DocDate eq '${d}'`).join(' or ');
-    
-    // 1. Fetch Pagos recibidos (IncomingPayments)
-    let nextLink: string | null = `/IncomingPayments?$filter=${filterStr}&$orderby=DocNum`;
-    while (nextLink) {
-      const res = await sapClient.request(nextLink);
-      if (res.ok) {
-        const data = await res.json();
-        const validPayments = (data.value || []).filter((p: any) => {
-          const jr = p.JournalRemarks ? String(p.JournalRemarks).trim().toUpperCase() : "";
-          const rm = p.Remarks ? String(p.Remarks).trim().toUpperCase() : "";
-          return jr !== "CANCELADO" && rm !== "CANCELADO" && p.Cancelled !== "tYES";
-        });
-        sapPayments = sapPayments.concat(validPayments);
-        
-        if (data['odata.nextLink']) {
-          nextLink = data['odata.nextLink'] as string;
-          if (!nextLink.startsWith('/')) nextLink = '/' + nextLink;
-        } else {
-          nextLink = null;
-        }
-      } else {
-        errorMessage = await res.text();
-        console.error("Error fetching SAP incoming payments:", errorMessage);
-        break;
-      }
-    }
-
-    // 2. Fetch Pagos efectuados (VendorPayments)
-    let vendorNextLink: string | null = `/VendorPayments?$filter=${filterStr}&$orderby=DocNum`;
-    while (vendorNextLink) {
-      const res = await sapClient.request(vendorNextLink);
-      if (res.ok) {
-        const data = await res.json();
-        const validVendorPayments = (data.value || []).filter((p: any) => {
-          const jr = p.JournalRemarks ? String(p.JournalRemarks).trim().toUpperCase() : "";
-          const rm = p.Remarks ? String(p.Remarks).trim().toUpperCase() : "";
-          return jr !== "CANCELADO" && rm !== "CANCELADO" && p.Cancelled !== "tYES";
-        });
-        vendorPayments = vendorPayments.concat(validVendorPayments);
-        
-        if (data['odata.nextLink']) {
-          vendorNextLink = data['odata.nextLink'] as string;
-          if (!vendorNextLink.startsWith('/')) vendorNextLink = '/' + vendorNextLink;
-        } else {
-          vendorNextLink = null;
-        }
-      } else {
-        vendorErrorMessage = await res.text();
-        console.error("Error fetching SAP vendor payments:", vendorErrorMessage);
-        break;
-      }
-    }
-
-  } catch (error: any) {
-    const errStr = error.message || String(error);
-    errorMessage = errorMessage || errStr;
-    vendorErrorMessage = vendorErrorMessage || errStr;
-    console.error("Exception fetching SAP payments:", error);
-  }
+  const { sapPayments, vendorPayments } = await fetchSapPayments();
 
   return (
     <div className="flex h-screen w-full bg-slate-50 selection:bg-blue-600/20">
