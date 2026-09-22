@@ -240,34 +240,39 @@ function readBancolombia(
 }
 
 // Traslados hacia el fondo de inversión (fiducia): Bancolombia los registra
-// como un cargo (salida) con la descripción "TRASLADO A FONDO DE INVERSION",
-// pero al ser un movimiento interno entre la cuenta y la fiducia, SAP lo
-// registra como un "Pago recibido" (IN) bajo la cuenta FIDECOMISO, con
-// tercero "FONDO DE INVERSION COLECTIVA ABIERTO FIDUCUENTA". Los traslados
-// de regreso ("TRASLADO DE FONDO DE INVERS...") ya llegan como créditos
-// normales y SAP los registra directamente en la cuenta de Bancolombia, así
-// que no necesitan una regla especial.
+// como un cargo (salida) con la descripción "TRASLADO A FONDO DE INVERSION".
+// SAP registra esto como un "Pago recibido" con TransferAccount=FIDECOMISO
+// (la pata principal, tipo IN) y una linea en PaymentAccounts para la cuenta
+// real del banco (tipo OUT, la pata que realmente concilia contra el banco;
+// ver convertApiToSapDocs en sap.ts). Por eso esta regla debe forzar tipo
+// "OUT": la pata "IN" bajo FIDECOMISO nunca tiene una cuenta que coincida con
+// cuentaOverride (queda como el codigo contable crudo, sin mapear), asi que
+// intentar cruzar contra ella nunca produce match. Los traslados de regreso
+// ("TRASLADO DE FONDO DE INVERS...") ya llegan como créditos normales y SAP
+// los registra directamente en la cuenta de Bancolombia, así que no
+// necesitan una regla especial.
 export const BANCOLOMBIA_SPECIAL_RULES: SpecialRule[] = [
   {
     pattern: /TRASLADO A FONDO DE INVERSION/,
-    tipo: "IN",
+    tipo: "OUT",
     cuenta: ["BANCOL.CTE # 008-927404-01", "FIDECOMISO"],
     tercero: "FONDO DE INVERSION COLECTIVA ABIERTO FIDUCUENTA",
   },
 ];
 
 // Traslados entre la cuenta corriente y la fiducia: el banco de Bogotá los
-// registra como cargo (débito) con la descripción "DB Inversion No ...". SAP
-// a veces registra el documento bajo la cuenta FIDECOMISO y a veces
-// directamente bajo la cuenta del banco; se buscan ambas y se usa la fecha
-// más cercana para decidir. Se restringe al tercero "FIDUCIARIA BOGOTA S.A",
-// que es el que corresponde a estos traslados de tesorería; "FONDO DE
-// INVERSION COLECTIVA ABIERTO FIDUCUENTA" es un flujo distinto (compra/
-// redención de unidades del fondo) que no debe cruzarse aquí.
+// registra como cargo (débito) con la descripción "DB Inversion No ...".
+// Mismo caso que BANCOLOMBIA_SPECIAL_RULES arriba: la pata que realmente
+// concilia contra el banco es la de PaymentAccounts (tipo OUT), no la pata
+// principal bajo FIDECOMISO (tipo IN, cuenta sin mapear). Se restringe al
+// tercero "FIDUCIARIA BOGOTA S.A", que es el que corresponde a estos
+// traslados de tesorería; "FONDO DE INVERSION COLECTIVA ABIERTO FIDUCUENTA"
+// es un flujo distinto (compra/redención de unidades del fondo) que no debe
+// cruzarse aquí.
 export const BOGOTA_SPECIAL_RULES: SpecialRule[] = [
   {
     pattern: /DB INVERSION/,
-    tipo: "IN",
+    tipo: "OUT",
     cuenta: ["BANCO DE BOGOTA # 406007252", "FIDECOMISO"],
     tercero: "FIDUCIARIA BOGOTA S.A",
   },
