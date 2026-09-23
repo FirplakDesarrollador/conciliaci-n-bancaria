@@ -1,5 +1,5 @@
 import ExcelJS from "exceljs";
-import { ACCOUNT_MAP, BOGOTA_CARD_DATE_TOLERANCE_DAYS, FILL_AMBIGUOUS, FILL_MATCHED, FILL_NO_MATCH } from "./config";
+import { ACCOUNT_MAP, BOGOTA_CARD_DATE_TOLERANCE_DAYS, FILL_AMBIGUOUS, FILL_MATCHED, FILL_NO_MATCH, VALUE_TOLERANCE } from "./config";
 import { setComment, setFill } from "./excel-helpers";
 import {
   applyCountMatching,
@@ -13,7 +13,7 @@ import {
 import { fixCompensacionDates, findHeaderRowAndCols, READERS, REQUIRED_HEADERS_HINT } from "./readers";
 import { loadSapDocs } from "./sap";
 import type { AccountStats, BankMove, SapDoc, SummaryRow } from "./types";
-import { isBankFee, norm, normAccount } from "./utils";
+import { isBankFee, norm, normAccount, sameMonth } from "./utils";
 
 export interface ReconcileInput {
   sapBuffer: Buffer;
@@ -62,6 +62,19 @@ export async function reconcileDocs(pool: SapDoc[], bankBuffers: Map<string, Buf
   const results: AccountResult[] = [];
   const summaryRows: SummaryRow[] = [];
 
+  const poolByDocNum = new Map<string, SapDoc[]>();
+  // Indice por valor redondeado, para calcular rapido (sin recorrer todo el
+  // pool por cada movimiento) que tan cerca esta el mejor documento
+  // candidato de cada movimiento bancario.
+  const poolByValue = new Map<number, SapDoc[]>();
+  for (const d of pool) {
+    if (!poolByDocNum.has(d.docNum)) poolByDocNum.set(d.docNum, []);
+    poolByDocNum.get(d.docNum)!.push(d);
+    const k = Math.round(d.value);
+    if (!poolByValue.has(k)) poolByValue.set(k, []);
+    poolByValue.get(k)!.push(d);
+  }
+
   for (const [accountKey, { file: fname, format: fmt }] of Object.entries(ACCOUNT_MAP)) {
     const buffer = bankBuffers.get(accountKey);
     if (!buffer) continue; // no se encontró/descargó el archivo, se omite
@@ -96,34 +109,84 @@ export async function reconcileDocs(pool: SapDoc[], bankBuffers: Map<string, Buf
       fueraDeRango: 0,
     };
 
+    // Pre-pasada: leer TODAS las hojas y reservar, antes de cruzar nada, los
+    // documentos que ya estan escritos en alguna fila de este archivo. Si la
+    // reserva se hiciera fila por fila durante el cruce, una fila vacia que
+    // se procesa ANTES de otra fila ya conciliada (mismo valor, dias
+    // distintos) tomaria el documento todavia "libre" y quedaria relacionado
+    // dos veces. La reserva se limita a las patas del documento que
+    // pertenecen a ESTA cuenta: un documento entre dos cuentas propias (ej.
+    // venta de dolares Miami -> Bancolombia) tiene una pata por archivo, y
+    // reservar la del otro banco lo dejaria sin conciliar alla.
+    const sheetsData: { ws: ExcelJS.Worksheet; moves: BankMove[] }[] = [];
     for (const ws of wb.worksheets) {
       const found = findHeaderRowAndCols(ws, hint);
       if (!found) continue;
-      const { headerRow, headers } = found;
+      const moves = reader(ws, found.headers, found.headerRow);
+      sheetsData.push({ ws, moves });
 
-      const moves = reader(ws, headers, headerRow);
+      for (const mv of moves) {
+        if (isEmptyDoc(mv.docValue)) continue;
+        const allowed = new Set(
+          [mv.cuentaOverride ?? normAccount(accountKey)].flat()
+        );
+        for (const num of extractDocNums(mv.docValue)) {
+          const legs = poolByDocNum.get(num);
+          if (!legs) continue;
+          const legsHere = legs.filter((d) => allowed.has(d.cuenta));
+          for (const d of legsHere.length > 0 ? legsHere : legs) {
+            if (!d.used) {
+              d.used = true;
+              d.usedBy = `${fname}!${ws.name}!R${mv.row}`;
+            }
+          }
+        }
+      }
+    }
+
+    for (const { ws, moves } of sheetsData) {
       const eligibleGroup = moves.filter((mv) => isEmptyDoc(mv.docValue));
       const { resolvedRows, nAssigned: nGrp0 } = applyGroupTotalMatch(eligibleGroup, pool, ws, fname, ws.name, accountKey);
       stats.matchGrupo += nGrp0;
       const nomatchMoves: BankMove[] = [];
 
-      for (const mv of moves) {
+      // Se procesa primero el movimiento cuyo mejor documento candidato esta
+      // mas cerca en fecha (no por orden de fila). Si dos movimientos tienen
+      // el mismo valor y solo hay un documento, se lo queda el de mejor
+      // coincidencia en vez del primero que aparezca en la hoja.
+      const nearestCandidateDays = (mv: BankMove): number => {
+        const allowed = new Set([mv.cuentaOverride ?? normAccount(accountKey)].flat());
+        const tf = mv.terceroFilter ? norm(mv.terceroFilter) : null;
+        const k = Math.round(mv.value);
+        let best = Infinity;
+        for (let dk = -1; dk <= 1; dk++) {
+          for (const d of poolByValue.get(k + dk) ?? []) {
+            if (d.used || d.tipo !== mv.tipo || !allowed.has(d.cuenta)) continue;
+            if (Math.abs(d.value - mv.value) > VALUE_TOLERANCE) continue;
+            if (!sameMonth(d.date, mv.date)) continue;
+            if (tf && !d.tercero.includes(tf)) continue;
+            best = Math.min(best, Math.abs(d.date.getTime() - mv.date.getTime()) / 86_400_000);
+          }
+        }
+        return best;
+      };
+      const orderedMoves = moves
+        .map((mv) => ({
+          mv,
+          dist:
+            !resolvedRows.has(mv.row) && isEmptyDoc(mv.docValue) && !isBankFee(mv.refText)
+              ? nearestCandidateDays(mv)
+              : Infinity,
+        }))
+        .sort((a, b) => (a.dist === b.dist ? 0 : a.dist < b.dist ? -1 : 1))
+        .map((x) => x.mv);
+
+      for (const mv of orderedMoves) {
         if (resolvedRows.has(mv.row)) continue;
         if (!isEmptyDoc(mv.docValue)) {
+          // Los documentos de esta fila ya fueron reservados en la
+          // pre-pasada de arriba.
           stats.yaTeniaDocumento++;
-          // Esta fila ya tiene documento(s) asignado(s) de una corrida
-          // anterior. Si no se marcan como usados aquí, quedan disponibles
-          // en el pool y, si existe OTRO movimiento del mismo valor más
-          // adelante en esta misma corrida (un valor que se repite, ej. un
-          // anticipo redondo), el mismo documento SAP se le vuelve a asignar
-          // a ese segundo movimiento — quedando relacionado dos veces.
-          const referencedDocNums = extractDocNums(mv.docValue);
-          for (const d of pool) {
-            if (!d.used && referencedDocNums.includes(d.docNum)) {
-              d.used = true;
-              d.usedBy = `${fname}!${ws.name}!R${mv.row}`;
-            }
-          }
           continue;
         }
         if (isBankFee(mv.refText)) {
