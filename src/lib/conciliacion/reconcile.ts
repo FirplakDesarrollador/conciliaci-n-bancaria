@@ -181,6 +181,64 @@ export async function reconcileDocs(pool: SapDoc[], bankBuffers: Map<string, Buf
         .sort((a, b) => (a.dist === b.dist ? 0 : a.dist < b.dist ? -1 : 1))
         .map((x) => x.mv);
 
+      // Pasada previa: una suma EXACTA (al centavo) de documentos del mismo
+      // tercero es una evidencia mucho mas fuerte que un documento individual
+      // con diferencia de centavos. Sin esta prioridad, el documento
+      // individual se asigna primero a otra fila y el combo correcto queda
+      // sin uno de sus miembros (82064: fila de $120.000 vs. combo
+      // 82064+82066 = $452.200,00 exactos). Solo aplica si NO existe un
+      // documento individual con valor exacto para esa fila.
+      for (const mv of orderedMoves) {
+        if (resolvedRows.has(mv.row) || !isEmptyDoc(mv.docValue) || isBankFee(mv.refText)) continue;
+        const cuentaEx = mv.cuentaOverride ?? normAccount(accountKey);
+        const allowedEx = new Set([cuentaEx].flat());
+        const tfEx = mv.terceroFilter ? norm(mv.terceroFilter) : null;
+        const poolEx = tfEx ? pool.filter((d) => d.tercero.includes(tfEx)) : pool;
+        const hasExactSingle = poolEx.some(
+          (d) =>
+            !d.used &&
+            d.tipo === mv.tipo &&
+            allowedEx.has(d.cuenta) &&
+            Math.abs(d.value - mv.value) < 0.005 &&
+            sameMonth(d.date, mv.date)
+        );
+        if (hasExactSingle) continue;
+        // Se agrupan los documentos disponibles por tercero y se busca la
+        // suma exacta DENTRO de cada tercero (el codigo comun que usa
+        // tryMultiMatch no distingue clientes en pagos recibidos).
+        const byTercero = new Map<string, SapDoc[]>();
+        for (const d of poolEx) {
+          if (d.used || d.tipo !== mv.tipo || !allowedEx.has(d.cuenta) || !d.tercero) continue;
+          if (!sameMonth(d.date, mv.date)) continue;
+          if (Math.abs(d.date.getTime() - mv.date.getTime()) > 10 * 86_400_000) continue;
+          if (!byTercero.has(d.tercero)) byTercero.set(d.tercero, []);
+          byTercero.get(d.tercero)!.push(d);
+        }
+        const exactCombos: SapDoc[][] = [];
+        for (const docsT of byTercero.values()) {
+          if (docsT.length < 2) continue;
+          if (docsT.reduce((sum, d) => sum + d.value, 0) < mv.value - 0.005) continue;
+          const c = tryMultiMatch(docsT, mv.tipo, cuentaEx, mv.value, mv.date, undefined, undefined, 8, 0.005);
+          if (c) exactCombos.push(c);
+        }
+        if (exactCombos.length !== 1) continue;
+        const exactCombo = exactCombos[0];
+        for (const d of exactCombo) {
+          d.used = true;
+          d.usedBy = `${fname}!${ws.name}!R${mv.row}`;
+        }
+        const nums = exactCombo.map((d) => d.docNum).join(", ");
+        const cellEx = ws.getRow(mv.row).getCell(mv.docCol);
+        cellEx.value = nums;
+        setFill(cellEx, FILL_MATCHED);
+        setComment(
+          cellEx,
+          `Suma exacta de ${exactCombo.length} documentos del mismo tercero: ${nums} = ${exactCombo.reduce((s, d) => s + d.value, 0).toFixed(2)}`
+        );
+        stats.matchPar++;
+        resolvedRows.add(mv.row);
+      }
+
       for (const mv of orderedMoves) {
         if (resolvedRows.has(mv.row)) continue;
         if (!isEmptyDoc(mv.docValue)) {

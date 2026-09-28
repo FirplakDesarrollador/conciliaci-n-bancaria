@@ -14,7 +14,7 @@ export default async function LiveReconciliation({
   // Almacenamos el DocNum, el valor, fecha, si es en USD, tipo (IN/OUT) y la
   // categoria (derivada de Remarks, ej. "CAJA MENOR") para el cruce por
   // categorias conocidas (GROUP_TOTAL_CATEGORIES) mas adelante.
-  const bankMap = new Map<string, { docNum: number, value: number, isUSD: boolean, date: Date, tipo: "IN" | "OUT", categoria: string }[]>();
+  const bankMap = new Map<string, { docNum: number, value: number, isUSD: boolean, date: Date, tipo: "IN" | "OUT", categoria: string, tercero: string }[]>();
 
   const processPayment = (payment: any, isIncoming: boolean) => {
     if (!payment.DocNum) return;
@@ -51,7 +51,8 @@ export default async function LiveReconciliation({
           isUSD: finalIsUSD,
           date: new Date(payment.DocDate),
           tipo: legTipo,
-          categoria
+          categoria,
+          tercero: String(payment.U_DescripTercero || payment.CardName || "").trim().toUpperCase()
         });
       }
     };
@@ -203,6 +204,57 @@ export default async function LiveReconciliation({
     const processedDocs: any[] = [];
     const usedDocs = new Set<number>(preUsedDocNums);
     const usedBankMoves = new Set<any>();
+
+    // Pass 0: sumas EXACTAS (al centavo) de documentos del mismo tercero. Es
+    // una evidencia mas fuerte que un documento individual con centavos de
+    // diferencia; sin esta prioridad, el individual se asigna primero a otra
+    // fila y el combo correcto queda sin uno de sus miembros. Solo aplica si
+    // NO hay un documento individual con valor exacto para ese movimiento.
+    for (const m of fileMoves) {
+      if (usedBankMoves.has(m)) continue;
+      const pending = docs.filter((d: any) => !usedDocs.has(d.docNum) && d.tipo === m.tipo && sameMonth(d.date, m.date));
+      if (pending.some((d: any) => Math.abs(d.value - m.value) < 0.005)) continue;
+
+      const byTercero = new Map<string, any[]>();
+      for (const d of pending) {
+        if (!d.tercero) continue;
+        if (Math.abs(d.date.getTime() - m.date.getTime()) > 10 * 24 * 60 * 60 * 1000) continue;
+        if (!byTercero.has(d.tercero)) byTercero.set(d.tercero, []);
+        byTercero.get(d.tercero)!.push(d);
+      }
+
+      const exactCombos: any[][] = [];
+      for (const docsT of byTercero.values()) {
+        if (docsT.length < 2 || docsT.length > 12) continue;
+        if (docsT.reduce((sum: number, d: any) => sum + d.value, 0) < m.value - 0.005) continue;
+        const pick = (start: number, chosen: any[], size: number): any[][] => {
+          if (chosen.length === size) {
+            return Math.abs(chosen.reduce((sum: number, d: any) => sum + d.value, 0) - m.value) < 0.005 ? [chosen] : [];
+          }
+          const out: any[][] = [];
+          for (let i = start; i < docsT.length; i++) out.push(...pick(i + 1, [...chosen, docsT[i]], size));
+          return out;
+        };
+        for (let size = 2; size <= Math.min(4, docsT.length); size++) {
+          const found = pick(0, [], size);
+          if (found.length === 1) { exactCombos.push(found[0]); break; }
+          if (found.length > 1) break;
+        }
+      }
+      if (exactCombos.length !== 1) continue;
+
+      const combo = exactCombos[0];
+      combo.forEach((d: any) => usedDocs.add(d.docNum));
+      usedBankMoves.add(m);
+      processedDocs.push({
+        isCombo: true, docs: combo, value: m.value, isMatch: true,
+        date: combo[0].date, isUSD: combo[0].isUSD, isFilled: false,
+        excelFile: configInfo ? configInfo.file : undefined,
+        sheetName: m.sheet,
+        excelRow: m.row,
+        excelCol: m.docCol
+      });
+    }
 
     // Pass 1: Individual matches
     for (const doc of docs) {

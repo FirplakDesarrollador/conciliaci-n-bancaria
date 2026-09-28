@@ -73,7 +73,8 @@ export function tryMultiMatch(
   fecha: Date,
   dateWindow?: number,
   sizes?: number[],
-  maxComboSize = 8
+  maxComboSize = 8,
+  tolerance: number = MULTI_VALUE_TOLERANCE
 ): SapDoc[] | null {
   const window = dateWindow !== undefined ? dateWindow : Math.max(DATE_TOLERANCE_DAYS, 10);
   const allowed = new Set(typeof cuenta === "string" ? [cuenta] : cuenta);
@@ -105,7 +106,7 @@ export function tryMultiMatch(
     for (const size of groupSizes) {
       if (docs.length < size) continue;
       for (const combo of combinations(docs, size)) {
-        if (Math.abs(combo.reduce((s, x) => s + x.value, 0) - valor) <= MULTI_VALUE_TOLERANCE) {
+        if (Math.abs(combo.reduce((s, x) => s + x.value, 0) - valor) <= tolerance) {
           found.push(combo);
         }
       }
