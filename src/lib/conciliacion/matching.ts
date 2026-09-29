@@ -1,7 +1,7 @@
 import type ExcelJS from "exceljs";
 import { DATE_TOLERANCE_DAYS, FILL_MATCHED, GROUP_TOTAL_CATEGORIES, MULTI_VALUE_TOLERANCE, VALUE_TOLERANCE } from "./config";
 import { setComment, setFill } from "./excel-helpers";
-import type { BankMove, MovTipo, SapDoc } from "./types";
+import type { BankMove, CellWrite, MovTipo, SapDoc } from "./types";
 import { combinations, daysBetween, infoCode, norm, normAccount, rangeInclusive, sameMonth, sequenceRatio } from "./utils";
 
 export type MatchHow =
@@ -188,7 +188,8 @@ export function applyCountMatching(
   sheetName: string,
   accountKey: string,
   maxImbalance = 1
-): { resolvedRows: Set<number>; nAssigned: number } {
+): { resolvedRows: Set<number>; nAssigned: number; writes: CellWrite[] } {
+  const writes: CellWrite[] = [];
   const groups = new Map<string, BankMove[]>();
   for (const mv of mvsPool) {
     const cuentaMv = mv.cuentaOverride ?? normAccount(accountKey);
@@ -244,6 +245,7 @@ export function applyCountMatching(
       doc.usedBy = `${fname}!${sheetName}!R${mv.row}`;
       const cell = ws.getRow(mv.row).getCell(mv.docCol);
       cell.value = doc.docNum;
+      writes.push({ sheet: sheetName, row: mv.row, col: mv.docCol, value: doc.docNum });
       setFill(cell, FILL_MATCHED);
       const notaDesbalance = diff
         ? ` ADVERTENCIA: la cantidad de movimientos (${mvs.length}) y de documentos (${cand.length}) no era igual; revisar el/los sobrante(s).`
@@ -257,7 +259,7 @@ export function applyCountMatching(
     }
   }
 
-  return { resolvedRows, nAssigned };
+  return { resolvedRows, nAssigned, writes };
 }
 
 /**
@@ -275,9 +277,10 @@ export function applyReverseCombo(
   sizes?: number[],
   dateWindow?: number,
   maxComboSize = 8
-): { resolvedRows: Set<number>; nAssigned: number } {
+): { resolvedRows: Set<number>; nAssigned: number; writes: CellWrite[] } {
   const window = dateWindow !== undefined ? dateWindow : DATE_TOLERANCE_DAYS;
   const resolvedRows = new Set<number>();
+  const writes: CellWrite[] = [];
   let nAssigned = 0;
 
   const groups = new Map<string, { tipoK: MovTipo; cuentaK: string | string[]; prefix: string; mvs: BankMove[] }>();
@@ -340,6 +343,7 @@ export function applyReverseCombo(
         doc.usedBy = `${fname}!${sheetName}!R${mv.row}`;
         const cell = ws.getRow(mv.row).getCell(mv.docCol);
         cell.value = doc.docNum;
+        writes.push({ sheet: sheetName, row: mv.row, col: mv.docCol, value: doc.docNum });
         setFill(cell, FILL_MATCHED);
         setComment(
           cell,
@@ -351,7 +355,7 @@ export function applyReverseCombo(
     }
   }
 
-  return { resolvedRows, nAssigned };
+  return { resolvedRows, nAssigned, writes };
 }
 
 /**
@@ -371,8 +375,9 @@ export function applyGroupTotalMatch(
   sheetName: string,
   accountKey: string,
   dateToleranceDays: number = 5
-): { resolvedRows: Set<number>; nAssigned: number } {
+): { resolvedRows: Set<number>; nAssigned: number; writes: CellWrite[] } {
   const resolvedRows = new Set<number>();
+  const writes: CellWrite[] = [];
   let nAssigned = 0;
 
   for (const [categoria, keywords] of Object.entries(GROUP_TOTAL_CATEGORIES)) {
@@ -433,6 +438,7 @@ export function applyGroupTotalMatch(
         docs[0].usedBy = `${fname}!${sheetName}!R${mv.row}`;
         const cell = ws.getRow(mv.row).getCell(mv.docCol);
         cell.value = docNums;
+        writes.push({ sheet: sheetName, row: mv.row, col: mv.docCol, value: docNums });
         setFill(cell, FILL_MATCHED);
         setComment(
           cell,
@@ -444,5 +450,5 @@ export function applyGroupTotalMatch(
     }
   }
 
-  return { resolvedRows, nAssigned };
+  return { resolvedRows, nAssigned, writes };
 }

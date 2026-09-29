@@ -30,6 +30,18 @@ export interface BankMove {
   terceroFilter?: string;
 }
 
+/** Una escritura individual de celda, para poder aplicarla luego con un
+ * PATCH quirurgico (updateExcelCellsBatch) en vez de subir el archivo
+ * completo. Subir el buffer entero pisa CUALQUIER cambio hecho al archivo
+ * real entre la descarga y la subida (una correccion manual, otra corrida
+ * concurrente) — ver [[feedback-never-duplicate-doc-best-match]]. */
+export interface CellWrite {
+  sheet: string;
+  row: number;
+  col: number;
+  value: string | number;
+}
+
 export interface SpecialRule {
   pattern: RegExp;
   tipo: MovTipo;

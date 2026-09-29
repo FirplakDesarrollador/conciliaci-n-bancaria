@@ -12,7 +12,7 @@ import {
 } from "./matching";
 import { fixCompensacionDates, findHeaderRowAndCols, READERS, REQUIRED_HEADERS_HINT } from "./readers";
 import { loadSapDocs } from "./sap";
-import type { AccountStats, BankMove, SapDoc, SummaryRow } from "./types";
+import type { AccountStats, BankMove, CellWrite, SapDoc, SummaryRow } from "./types";
 import { isBankFee, norm, normAccount, sameMonth } from "./utils";
 
 export interface ReconcileInput {
@@ -26,6 +26,10 @@ export interface AccountResult {
   archivo: string;
   outputFileName: string;
   workbookBuffer: Buffer;
+  /** Cada celda que se escribio en esta corrida, para poder aplicarlas con
+   * un PATCH quirurgico en vez de subir el archivo completo (ver CellWrite
+   * en types.ts). */
+  writes: CellWrite[];
   stats: AccountStats;
 }
 
@@ -108,6 +112,7 @@ export async function reconcileDocs(pool: SapDoc[], bankBuffers: Map<string, Buf
       yaTeniaDocumento: 0,
       fueraDeRango: 0,
     };
+    const writes: CellWrite[] = [];
 
     // Pre-pasada: leer TODAS las hojas y reservar, antes de cruzar nada, los
     // documentos que ya estan escritos en alguna fila de este archivo. Si la
@@ -146,8 +151,9 @@ export async function reconcileDocs(pool: SapDoc[], bankBuffers: Map<string, Buf
 
     for (const { ws, moves } of sheetsData) {
       const eligibleGroup = moves.filter((mv) => isEmptyDoc(mv.docValue));
-      const { resolvedRows, nAssigned: nGrp0 } = applyGroupTotalMatch(eligibleGroup, pool, ws, fname, ws.name, accountKey);
+      const { resolvedRows, nAssigned: nGrp0, writes: writesGrp0 } = applyGroupTotalMatch(eligibleGroup, pool, ws, fname, ws.name, accountKey);
       stats.matchGrupo += nGrp0;
+      writes.push(...writesGrp0);
       const nomatchMoves: BankMove[] = [];
 
       // Se procesa primero el movimiento cuyo mejor documento candidato esta
@@ -230,6 +236,7 @@ export async function reconcileDocs(pool: SapDoc[], bankBuffers: Map<string, Buf
         const nums = exactCombo.map((d) => d.docNum).join(", ");
         const cellEx = ws.getRow(mv.row).getCell(mv.docCol);
         cellEx.value = nums;
+        writes.push({ sheet: ws.name, row: mv.row, col: mv.docCol, value: nums });
         setFill(cellEx, FILL_MATCHED);
         setComment(
           cellEx,
@@ -280,6 +287,7 @@ export async function reconcileDocs(pool: SapDoc[], bankBuffers: Map<string, Buf
           const nums = sameDayCombo.map((d) => d.docNum).join(", ");
           const suma = sameDayCombo.reduce((s, d) => s + d.value, 0);
           cell.value = nums;
+          writes.push({ sheet: ws.name, row: mv.row, col: mv.docCol, value: nums });
           setFill(cell, FILL_MATCHED);
           setComment(
             cell,
@@ -299,6 +307,7 @@ export async function reconcileDocs(pool: SapDoc[], bankBuffers: Map<string, Buf
             const nums = combo1.map((d) => d.docNum).join(", ");
             const suma = combo1.reduce((s, d) => s + d.value, 0);
             cell.value = nums;
+            writes.push({ sheet: ws.name, row: mv.row, col: mv.docCol, value: nums });
             setFill(cell, FILL_MATCHED);
             setComment(cell, `Suma de ${combo1.length} recibos con la misma info detallada: ${nums} = ${suma.toFixed(2)}`);
             stats.matchPar++;
@@ -314,6 +323,7 @@ export async function reconcileDocs(pool: SapDoc[], bankBuffers: Map<string, Buf
             const nums = combo2.map((d) => d.docNum).join(", ");
             const suma = combo2.reduce((s, d) => s + d.value, 0);
             cell.value = nums;
+            writes.push({ sheet: ws.name, row: mv.row, col: mv.docCol, value: nums });
             setFill(cell, FILL_MATCHED);
             setComment(
               cell,
@@ -332,6 +342,7 @@ export async function reconcileDocs(pool: SapDoc[], bankBuffers: Map<string, Buf
           doc.used = true;
           doc.usedBy = `${fname}!${ws.name}!R${mv.row}`;
           cell.value = doc.docNum;
+          writes.push({ sheet: ws.name, row: mv.row, col: mv.docCol, value: doc.docNum });
           setFill(cell, FILL_MATCHED);
           if (how === "exacta") stats.matchExacto++;
           else if (how === "tolerancia") stats.matchTolerancia++;
@@ -344,6 +355,7 @@ export async function reconcileDocs(pool: SapDoc[], bankBuffers: Map<string, Buf
           bestDoc.used = true;
           bestDoc.usedBy = `${fname}!${ws.name}!R${mv.row}`;
           cell.value = bestDoc.docNum;
+          writes.push({ sheet: ws.name, row: mv.row, col: mv.docCol, value: bestDoc.docNum });
           setFill(cell, FILL_MATCHED);
           if (how === "exacta") stats.matchExacto++;
           else stats.matchTolerancia++;
@@ -359,6 +371,7 @@ export async function reconcileDocs(pool: SapDoc[], bankBuffers: Map<string, Buf
           doc.used = true;
           doc.usedBy = `${fname}!${ws.name}!R${mv.row}`;
           cell.value = doc.docNum;
+          writes.push({ sheet: ws.name, row: mv.row, col: mv.docCol, value: doc.docNum });
           setFill(cell, FILL_MATCHED);
           setComment(
             cell,
@@ -392,7 +405,7 @@ export async function reconcileDocs(pool: SapDoc[], bankBuffers: Map<string, Buf
 
       // Segunda pasada: puede que lo que quedó sin documento ahora sí
       // cuadre en cantidad contra los documentos que sobraron en el pool.
-      const { resolvedRows: resolvedRows2, nAssigned: nPost } = applyCountMatching(
+      const { resolvedRows: resolvedRows2, nAssigned: nPost, writes: writesPost } = applyCountMatching(
         nomatchMoves,
         pool,
         ws,
@@ -401,10 +414,11 @@ export async function reconcileDocs(pool: SapDoc[], bankBuffers: Map<string, Buf
         accountKey
       );
       stats.matchConteo += nPost;
+      writes.push(...writesPost);
 
       // Tercera pasada: un solo documento SAP dividido en varios movimientos.
       const remainingMoves = nomatchMoves.filter((mv) => !resolvedRows2.has(mv.row));
-      const { resolvedRows: resolvedRows3, nAssigned: nRev } = applyReverseCombo(
+      const { resolvedRows: resolvedRows3, nAssigned: nRev, writes: writesRev } = applyReverseCombo(
         remainingMoves,
         pool,
         ws,
@@ -413,10 +427,11 @@ export async function reconcileDocs(pool: SapDoc[], bankBuffers: Map<string, Buf
         accountKey
       );
       stats.matchInverso += nRev;
+      writes.push(...writesRev);
 
       // Cuarta pasada: categorías conocidas sin correspondencia 1 a 1.
       const remainingMoves2 = remainingMoves.filter((mv) => !resolvedRows3.has(mv.row));
-      const { resolvedRows: resolvedRows4, nAssigned: nGrp } = applyGroupTotalMatch(
+      const { resolvedRows: resolvedRows4, nAssigned: nGrp, writes: writesGrp } = applyGroupTotalMatch(
         remainingMoves2,
         pool,
         ws,
@@ -425,6 +440,7 @@ export async function reconcileDocs(pool: SapDoc[], bankBuffers: Map<string, Buf
         accountKey
       );
       stats.matchGrupo += nGrp;
+      writes.push(...writesGrp);
 
       const allResolved = new Set<number>([...resolvedRows2, ...resolvedRows3, ...resolvedRows4]);
       for (const mv of nomatchMoves) {
@@ -446,7 +462,7 @@ export async function reconcileDocs(pool: SapDoc[], bankBuffers: Map<string, Buf
 
     const outputFileName = fname.replace(/\.xlsx$/i, "_CONCILIADO.xlsx");
     const outBuffer = Buffer.from(await wb.xlsx.writeBuffer());
-    results.push({ cuentaKey: accountKey, archivo: fname, outputFileName, workbookBuffer: outBuffer, stats });
+    results.push({ cuentaKey: accountKey, archivo: fname, outputFileName, workbookBuffer: outBuffer, writes, stats });
   }
 
   const unusedDocs = pool.filter((d) => !d.used);

@@ -1,11 +1,22 @@
 import "server-only";
 import { convertApiToSapDocs } from "./sap";
 import { reconcileDocs } from "./reconcile";
-import { listDriveFiles, downloadDriveFile, uploadDriveFile } from "@/lib/graph/sharepoint";
+import { listDriveFiles, downloadDriveFile, updateExcelCellsBatch } from "@/lib/graph/sharepoint";
 import { ACCOUNT_MAP, TRANSFER_ACCOUNT_NAMES } from "./config";
 
 const normalizeStr = (s: string) =>
   s.normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^A-Z0-9]/gi, "").toUpperCase();
+
+function colToLetter(columnNumber: number): string {
+  let temp: number;
+  let letter = "";
+  while (columnNumber > 0) {
+    temp = (columnNumber - 1) % 26;
+    letter = String.fromCharCode(temp + 65) + letter;
+    columnNumber = (columnNumber - temp - 1) / 26;
+  }
+  return letter;
+}
 
 /**
  * Motor completo de sincronizacion SAP -> Excel de bancos: descarga los
@@ -82,16 +93,35 @@ export async function runFullSync(sapPayments: any[], vendorPayments: any[]) {
     // 4. Ejecutar motor de conciliacion
     const { results } = await reconcileDocs(pool, bankBuffers);
 
-    // 5. Subir los archivos actualizados
+    // 5. Aplicar SOLO las celdas que cambiaron, con PATCH quirurgico
+    // (updateExcelCellsBatch), en vez de subir el workbook completo. Subir
+    // el buffer entero pisaria cualquier cambio hecho al archivo real entre
+    // la descarga (paso 3) y este punto -- una correccion manual de alguien
+    // en Excel, u otra corrida de sincronizacion concurrente -- sin dejar
+    // rastro de que se perdio. Ver commit del 2026-09-29 (81399 -> 81993).
     const updateResults: Record<string, { status: string, error?: string }> = {};
 
     await Promise.allSettled(results.map(async (res) => {
+      if (res.writes.length === 0) {
+        updateResults[res.cuentaKey] = { status: "SIN CAMBIOS" };
+        return;
+      }
       try {
-        await uploadDriveFile(res.archivo, res.workbookBuffer);
-        updateResults[res.cuentaKey] = { status: "ACTUALIZADO SATISFACTORIAMENTE" };
+        const updates = res.writes.map((w) => ({
+          sheetName: w.sheet,
+          cellAddress: `${colToLetter(w.col)}${w.row}`,
+          value: w.value,
+          color: "#C6EFCE",
+        }));
+        const result = await updateExcelCellsBatch(res.archivo, updates);
+        if (result.success) {
+          updateResults[res.cuentaKey] = { status: "ACTUALIZADO SATISFACTORIAMENTE" };
+        } else {
+          updateResults[res.cuentaKey] = { status: "ERROR", error: result.errors.join(" | ") };
+        }
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       } catch (e: any) {
-        console.error(`Error subiendo ${res.archivo}:`, e);
+        console.error(`Error actualizando celdas de ${res.archivo}:`, e);
         updateResults[res.cuentaKey] = { status: "ERROR", error: e.message || String(e) };
       }
     }));
