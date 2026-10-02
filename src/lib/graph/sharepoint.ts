@@ -20,9 +20,12 @@ function encodeDrivePath(path: string): string {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-export async function downloadDriveFile(fileName: string): Promise<Buffer> {
+export async function downloadDriveFile(
+  fileName: string,
+  folderPath: string = CONCILIACION_FOLDER_PATH
+): Promise<Buffer> {
   const token = await getGraphAccessToken();
-  const path = `${CONCILIACION_FOLDER_PATH}/${fileName}`;
+  const path = `${folderPath}/${fileName}`;
   const res = await fetch(
     `${GRAPH_BASE_URL}/drives/${CONCILIACION_DRIVE_ID}/root:${encodeDrivePath(path)}:/content`,
     { headers: { Authorization: `Bearer ${token}` }, cache: "no-store" }

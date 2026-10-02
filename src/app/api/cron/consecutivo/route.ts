@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { buildConsecutivoWorkbook, controlFileName } from "@/lib/conciliacion/consecutivo";
 import { driveFolderExists, folderPathForYear, uploadDriveFile } from "@/lib/graph/sharepoint";
 
-export const maxDuration = 60;
+export const maxDuration = 300;
 
 function bogotaYear(): number {
   return Number(new Intl.DateTimeFormat("en-CA", { timeZone: "America/Bogota", year: "numeric" }).format(new Date()));
@@ -37,6 +37,13 @@ export async function GET(request: Request) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   } catch (error: any) {
     console.error("Error generando control de consecutivo:", error);
-    return NextResponse.json({ success: false, error: error.message || String(error) }, { status: 500 });
+    const msg: string = error.message || String(error);
+    if (msg.includes("HTTP 423")) {
+      return NextResponse.json(
+        { success: false, error: "El archivo de control esta abierto/bloqueado en SharePoint (423); se reintenta en la siguiente corrida." },
+        { status: 423 }
+      );
+    }
+    return NextResponse.json({ success: false, error: msg }, { status: 500 });
   }
 }

@@ -1,7 +1,9 @@
 import "server-only";
 import ExcelJS from "exceljs";
 import { sapClient } from "@/lib/sap/service-layer";
-import { TRANSFER_ACCOUNT_NAMES } from "./config";
+import { downloadDriveFile, folderPathForYear } from "@/lib/graph/sharepoint";
+import { ACCOUNT_MAP, MANUAL_CUENTA_OVERRIDES, TRANSFER_ACCOUNT_NAMES } from "./config";
+import { findHeaderRowAndCols, READERS, REQUIRED_HEADERS_HINT } from "./readers";
 
 // En 2026 el control arranca en octubre (decision del usuario, 2026-10-01:
 // setiembre ya quedo cerrado sin este control). Desde 2027 se genera un
@@ -16,6 +18,7 @@ export function controlFileName(year: number): string {
 }
 
 const FIELDS = "DocNum,DocEntry,Series,DocDate,Cancelled,CardCode,CardName,TransferAccount,CashAccount,TransferSum,CashSum,Remarks,JournalRemarks";
+const FIDUCIA_ACCOUNT = "12450505";
 
 interface RawDoc {
   DocNum: number;
@@ -28,8 +31,6 @@ interface RawDoc {
   CashAccount?: string | null;
   TransferSum?: number;
   CashSum?: number;
-  Remarks?: string;
-  JournalRemarks?: string;
 }
 
 async function fetchAllBetween(
@@ -50,16 +51,181 @@ async function fetchAllBetween(
   return all;
 }
 
+const normalizeStr = (s: string) =>
+  s.normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^A-Z0-9]/gi, "").toUpperCase();
+
+// ---------------------------------------------------------------------------
+// Validacion contra los archivos de banco
+// ---------------------------------------------------------------------------
+
+interface Loc {
+  bankKey: string;
+  sheet: string;
+  row: number;
+}
+
+interface BankIndex {
+  /** numero de documento -> filas de banco donde esta escrito */
+  byDoc: Map<string, Loc[]>;
+  /** llaves de ACCOUNT_MAP cuyo archivo del ano se pudo leer */
+  available: Set<string>;
+}
+
+function bankFileForYear(file: string, year: number): string {
+  return file.replace(/\d{4}\.xlsx$/, `${year}.xlsx`);
+}
+
+async function buildBankIndex(year: number): Promise<BankIndex> {
+  const byDoc = new Map<string, Loc[]>();
+  const available = new Set<string>();
+  const folder = folderPathForYear(year);
+
+  await Promise.all(
+    Object.entries(ACCOUNT_MAP).map(async ([bankKey, cfg]) => {
+      let buffer: Buffer;
+      try {
+        buffer = await downloadDriveFile(bankFileForYear(cfg.file, year), folder);
+      } catch (e) {
+        console.error(`Control consecutivo: no se pudo descargar ${bankKey}:`, e);
+        return;
+      }
+      const wb = new ExcelJS.Workbook();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await wb.xlsx.load(buffer as any);
+      available.add(bankKey);
+
+      for (const ws of wb.worksheets) {
+        const found = findHeaderRowAndCols(ws, REQUIRED_HEADERS_HINT[cfg.format]);
+        if (!found) continue;
+        const seenRows = new Set<number>();
+        for (const mv of READERS[cfg.format](ws, found.headers, found.headerRow)) {
+          if (seenRows.has(mv.row)) continue;
+          seenRows.add(mv.row);
+          if (mv.docValue === null || mv.docValue === undefined || mv.docValue === "") continue;
+          for (const num of String(mv.docValue).match(/\d+/g) ?? []) {
+            if (num.length < 5) continue;
+            if (!byDoc.has(num)) byDoc.set(num, []);
+            byDoc.get(num)!.push({ bankKey, sheet: ws.name, row: mv.row });
+          }
+        }
+      }
+    })
+  );
+
+  return { byDoc, available };
+}
+
+function accountKeyOf(code?: string | null): string | undefined {
+  if (!code) return undefined;
+  const name = TRANSFER_ACCOUNT_NAMES[code];
+  if (!name) return undefined;
+  const n = normalizeStr(name);
+  return Object.keys(ACCOUNT_MAP).find(
+    (k) => normalizeStr(k) === n || n.includes(normalizeStr(k)) || normalizeStr(k).includes(n)
+  );
+}
+
+/**
+ * Bancos (llaves de ACCOUNT_MAP) donde SAP indica que debe quedar el
+ * documento: la cuenta de transferencia/caja y, en traslados entre cuentas
+ * propias (Fiducia, venta de dolares), el banco que viaja en CardCode.
+ */
+function expectedBanks(d: RawDoc): string[] {
+  const acc = d.TransferAccount || d.CashAccount || "";
+  const keys = new Set<string>();
+  if (acc !== FIDUCIA_ACCOUNT) {
+    const k = accountKeyOf(acc);
+    if (k) keys.add(k);
+  }
+  const ck = accountKeyOf(d.CardCode);
+  if (ck) keys.add(ck);
+  return [...keys];
+}
+
+const PROBLEMAS = new Set([
+  "NO DESCARGADO",
+  "DESCARGA PARCIAL",
+  "BANCO DISTINTO",
+  "VARIAS FILAS",
+  "CANCELADO AUN DESCARGADO",
+]);
+
+interface Validacion {
+  conciliacion: string;
+  ubicacion: string;
+  observacion: string;
+}
+
+function validar(d: RawDoc, index: BankIndex, bancoSap: string): Validacion {
+  const num = String(d.DocNum);
+  const locs = index.byDoc.get(num) ?? [];
+  const ubicacion = locs.map((l) => `${l.bankKey} ${l.sheet} fila ${l.row}`).join(" | ");
+
+  if (d.Cancelled === "tYES") {
+    return locs.length > 0
+      ? { conciliacion: "CANCELADO AUN DESCARGADO", ubicacion, observacion: "El documento esta cancelado en SAP pero sigue escrito en el banco." }
+      : { conciliacion: "No aplica (cancelado)", ubicacion: "", observacion: "" };
+  }
+
+  const expected = expectedBanks(d);
+  const override = MANUAL_CUENTA_OVERRIDES[num];
+  const expectedWithFile = expected.filter((k) => index.available.has(k));
+
+  if (expectedWithFile.length === 0) {
+    if (locs.length > 0) {
+      return {
+        conciliacion: "BANCO DISTINTO",
+        ubicacion,
+        observacion: `SAP indica ${bancoSap} (sin archivo de banco) pero esta descargado en un banco.${override ? " Correccion manual conocida." : ""}`,
+      };
+    }
+    return { conciliacion: "No aplica (sin archivo de banco)", ubicacion: "", observacion: "" };
+  }
+
+  const inExpected = locs.filter((l) => expectedWithFile.includes(l.bankKey));
+  const inOther = locs.filter((l) => !expectedWithFile.includes(l.bankKey));
+
+  if (inOther.length > 0) {
+    return {
+      conciliacion: "BANCO DISTINTO",
+      ubicacion,
+      observacion: `SAP indica ${expectedWithFile.join(" / ")} pero esta en ${[...new Set(inOther.map((l) => l.bankKey))].join(" / ")}.${override ? " Correccion manual conocida." : " Posible error de banco asignado en SAP."}`,
+    };
+  }
+
+  const banksCovered = new Set(inExpected.map((l) => l.bankKey));
+  const missing = expectedWithFile.filter((k) => !banksCovered.has(k));
+  if (missing.length === expectedWithFile.length) {
+    return { conciliacion: "NO DESCARGADO", ubicacion: "", observacion: `No aparece en ${missing.join(" / ")}.` };
+  }
+  if (missing.length > 0) {
+    return { conciliacion: "DESCARGA PARCIAL", ubicacion, observacion: `Falta en ${missing.join(" / ")}.` };
+  }
+
+  for (const k of banksCovered) {
+    const rows = new Set(inExpected.filter((l) => l.bankKey === k).map((l) => `${l.sheet}!${l.row}`));
+    if (rows.size > 1) {
+      return { conciliacion: "VARIAS FILAS", ubicacion, observacion: `El mismo documento esta en ${rows.size} filas de ${k}.` };
+    }
+  }
+  return { conciliacion: "Descargado", ubicacion, observacion: "" };
+}
+
+// ---------------------------------------------------------------------------
+// Consecutivo + nombres de banco
+// ---------------------------------------------------------------------------
+
 interface ControlRow {
   docNum: number;
-  estado: "OK" | "CANCELADO" | "FALTANTE";
+  estado: "VIGENTE" | "CANCELADO" | "FALTANTE";
   fecha?: string;
   banco?: string;
   tercero?: string;
   valor?: number;
+  conciliacion?: string;
+  ubicacion?: string;
+  observacion?: string;
 }
-
-const FIDUCIA_ACCOUNT = "12450505";
 
 // Banco del documento: la cuenta de transferencia/caja de SAP traducida al
 // nombre del banco. En los traslados a Fiducia la cuenta de transferencia es
@@ -88,7 +254,7 @@ async function fetchAccountNames(codes: string[]): Promise<Map<string, string>> 
   return names;
 }
 
-function buildControlRows(docs: RawDoc[], extraNames: Map<string, string>): ControlRow[] {
+function buildControlRows(docs: RawDoc[], extraNames: Map<string, string>, index: BankIndex): ControlRow[] {
   const byDocNum = new Map<number, RawDoc>();
   for (const d of docs) byDocNum.set(d.DocNum, d);
   const nums = [...byDocNum.keys()];
@@ -103,13 +269,18 @@ function buildControlRows(docs: RawDoc[], extraNames: Map<string, string>): Cont
       rows.push({ docNum: n, estado: "FALTANTE" });
       continue;
     }
+    const banco = bancoDe(d, extraNames);
+    const v = validar(d, index, banco);
     rows.push({
       docNum: n,
-      estado: d.Cancelled === "tYES" ? "CANCELADO" : "OK",
+      estado: d.Cancelled === "tYES" ? "CANCELADO" : "VIGENTE",
       fecha: d.DocDate.slice(0, 10),
-      banco: bancoDe(d, extraNames),
+      banco,
       tercero: d.CardName || "",
       valor: d.TransferSum || d.CashSum || 0,
+      conciliacion: v.conciliacion,
+      ubicacion: v.ubicacion,
+      observacion: v.observacion,
     });
   }
   return rows;
@@ -120,35 +291,48 @@ function monthNameEs(monthIndex0: number): string {
   return names[monthIndex0];
 }
 
+const COLUMNS = ["# Documento", "Estado", "Fecha", "Banco SAP", "Tercero", "Valor", "Conciliacion", "Ubicacion en bancos", "Observacion"];
+const WIDTHS = [14, 12, 12, 42, 40, 16, 30, 50, 60];
+
+function styleRow(row: ExcelJS.Row, r: ControlRow) {
+  const problem = r.estado === "FALTANTE" || (r.conciliacion !== undefined && PROBLEMAS.has(r.conciliacion));
+  const argb = problem ? "FFFFC7CE" : r.estado === "CANCELADO" ? "FFFFEB9C" : null;
+  if (!argb) return;
+  row.eachCell((c) => { c.fill = { type: "pattern", pattern: "solid", fgColor: { argb } }; });
+}
+
 function writeSheet(wb: ExcelJS.Workbook, name: string, rows: ControlRow[]) {
   const ws = wb.addWorksheet(name.slice(0, 31));
-  ws.addRow(["# Documento", "Estado", "Fecha", "Banco", "Tercero", "Valor"]);
+  ws.addRow(COLUMNS);
   ws.getRow(1).font = { bold: true };
   for (const r of rows) {
-    const row = ws.addRow([r.docNum, r.estado, r.fecha ?? "", r.banco ?? "", r.tercero ?? "", r.valor ?? ""]);
-    if (r.estado === "FALTANTE") {
-      row.eachCell((c) => { c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFFC7CE" } }; });
-    } else if (r.estado === "CANCELADO") {
-      row.eachCell((c) => { c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFFEB9C" } }; });
-    }
+    const row = ws.addRow([
+      r.docNum, r.estado, r.fecha ?? "", r.banco ?? "", r.tercero ?? "", r.valor ?? "",
+      r.conciliacion ?? "", r.ubicacion ?? "", r.observacion ?? "",
+    ]);
+    styleRow(row, r);
   }
-  [14, 12, 12, 42, 40, 16].forEach((w, i) => { ws.getColumn(i + 1).width = w; });
+  WIDTHS.forEach((w, i) => { ws.getColumn(i + 1).width = w; });
+  ws.views = [{ state: "frozen", ySplit: 1 }];
 }
 
 /**
- * Genera el archivo de control de consecutivo para pagos recibidos
- * (IncomingPayments, serie unica 151) y pagos efectuados (VendorPayments,
- * puede tener varias series -- ej. 70 para ACH electronico, -1 para
- * pagos manuales -- cada una con su propia numeracion independiente, asi
- * que el consecutivo se revisa POR SERIE, no por tipo de documento).
- * Una hoja por mes y por serie; dentro de cada hoja, cada numero entre el
- * minimo y el maximo visto queda marcado OK / CANCELADO / FALTANTE.
+ * Archivo de control de pagos recibidos (IncomingPayments, serie 151) y
+ * efectuados (VendorPayments, varias series independientes: 70, 71, -1...;
+ * el consecutivo se revisa POR SERIE). Una hoja por mes y por serie; cada
+ * numero entre el minimo y el maximo visto queda VIGENTE / CANCELADO /
+ * FALTANTE, y cada documento vigente se valida contra los archivos de banco
+ * del ano: Descargado, NO DESCARGADO, DESCARGA PARCIAL, BANCO DISTINTO (error
+ * de banco asignado en SAP), VARIAS FILAS, o CANCELADO AUN DESCARGADO. Las
+ * cuentas sin archivo de banco (cajas) quedan "No aplica". Las filas con
+ * inconsistencias van en rojo y se repiten en la hoja "Inconsistencias".
  */
 export async function buildConsecutivoWorkbook(year: number): Promise<Buffer> {
   const { from, to } = controlRangeForYear(year);
-  const [incoming, vendor] = await Promise.all([
+  const [incoming, vendor, index] = await Promise.all([
     fetchAllBetween("IncomingPayments", from, to),
     fetchAllBetween("VendorPayments", from, to),
+    buildBankIndex(year),
   ]);
 
   const extraNames = await fetchAccountNames(
@@ -159,23 +343,22 @@ export async function buildConsecutivoWorkbook(year: number): Promise<Buffer> {
   );
 
   const wb = new ExcelJS.Workbook();
+  const sheets: { name: string; rows: ControlRow[] }[] = [];
 
   const byMonth = (docs: RawDoc[]) => {
     const m = new Map<string, RawDoc[]>();
     for (const d of docs) {
       const dt = new Date(d.DocDate);
-      const key = `${dt.getUTCFullYear()}-${dt.getUTCMonth()}`;
+      const key = `${dt.getUTCFullYear()}-${String(dt.getUTCMonth()).padStart(2, "0")}`;
       if (!m.has(key)) m.set(key, []);
       m.get(key)!.push(d);
     }
     return m;
   };
 
-  const incomingByMonth = byMonth(incoming);
-  for (const [key, docs] of [...incomingByMonth.entries()].sort()) {
-    const [, monthIdx] = key.split("-").map(Number);
-    const rows = buildControlRows(docs, extraNames);
-    writeSheet(wb, `Recibidos ${monthNameEs(monthIdx)}`, rows);
+  for (const [key, docs] of [...byMonth(incoming).entries()].sort()) {
+    const monthIdx = Number(key.split("-")[1]);
+    sheets.push({ name: `Recibidos ${monthNameEs(monthIdx)}`, rows: buildControlRows(docs, extraNames, index) });
   }
 
   const vendorBySeries = new Map<number, RawDoc[]>();
@@ -183,32 +366,54 @@ export async function buildConsecutivoWorkbook(year: number): Promise<Buffer> {
     if (!vendorBySeries.has(d.Series)) vendorBySeries.set(d.Series, []);
     vendorBySeries.get(d.Series)!.push(d);
   }
-  for (const [series, docsOfSeries] of vendorBySeries) {
-    const byMonthForSeries = byMonth(docsOfSeries);
-    for (const [key, docs] of [...byMonthForSeries.entries()].sort()) {
-      const [, monthIdx] = key.split("-").map(Number);
-      const rows = buildControlRows(docs, extraNames);
-      writeSheet(wb, `Efectuados S${series} ${monthNameEs(monthIdx)}`, rows);
+  for (const [series, docsOfSeries] of [...vendorBySeries.entries()].sort((a, b) => a[0] - b[0])) {
+    for (const [key, docs] of [...byMonth(docsOfSeries).entries()].sort()) {
+      const monthIdx = Number(key.split("-")[1]);
+      sheets.push({ name: `Efectuados S${series} ${monthNameEs(monthIdx)}`, rows: buildControlRows(docs, extraNames, index) });
     }
   }
 
-  const resumen = wb.addWorksheet("Resumen", { views: [{ state: "frozen", ySplit: 1 }] });
-  resumen.addRow(["Hoja", "OK", "Cancelados", "Faltantes"]);
+  // Resumen
+  const resumen = wb.addWorksheet("Resumen");
+  resumen.addRow(["Hoja", "Vigentes", "Cancelados", "Faltantes", "Inconsistencias de conciliacion"]);
   resumen.getRow(1).font = { bold: true };
-  for (const ws of wb.worksheets) {
-    if (ws.name === "Resumen") continue;
-    let ok = 0, canc = 0, falt = 0;
-    ws.eachRow((row, i) => {
-      if (i === 1) return;
-      const estado = row.getCell(2).value;
-      if (estado === "OK") ok++;
-      else if (estado === "CANCELADO") canc++;
-      else if (estado === "FALTANTE") falt++;
-    });
-    resumen.addRow([ws.name, ok, canc, falt]);
+  const porTipo = new Map<string, number>();
+  const inconsistencias = wb.addWorksheet("Inconsistencias");
+  inconsistencias.addRow(["Hoja", ...COLUMNS]);
+  inconsistencias.getRow(1).font = { bold: true };
+
+  for (const sh of sheets) {
+    let vig = 0, canc = 0, falt = 0, inc = 0;
+    for (const r of sh.rows) {
+      if (r.estado === "VIGENTE") vig++;
+      else if (r.estado === "CANCELADO") canc++;
+      else falt++;
+      const problema = r.estado === "FALTANTE" || (r.conciliacion !== undefined && PROBLEMAS.has(r.conciliacion));
+      if (r.conciliacion && PROBLEMAS.has(r.conciliacion)) {
+        inc++;
+        porTipo.set(r.conciliacion, (porTipo.get(r.conciliacion) ?? 0) + 1);
+      }
+      if (r.estado === "FALTANTE") porTipo.set("NUMERO FALTANTE EN EL CONSECUTIVO", (porTipo.get("NUMERO FALTANTE EN EL CONSECUTIVO") ?? 0) + 1);
+      if (problema) {
+        const row = inconsistencias.addRow([
+          sh.name, r.docNum, r.estado, r.fecha ?? "", r.banco ?? "", r.tercero ?? "", r.valor ?? "",
+          r.estado === "FALTANTE" ? "NUMERO FALTANTE" : r.conciliacion ?? "", r.ubicacion ?? "", r.observacion ?? "",
+        ]);
+        row.eachCell((c) => { c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFFC7CE" } }; });
+      }
+    }
+    resumen.addRow([sh.name, vig, canc, falt, inc]);
+    writeSheet(wb, sh.name, sh.rows);
   }
-  wb.worksheets.sort((a, b) => (a.name === "Resumen" ? -1 : b.name === "Resumen" ? 1 : 0));
-  [40, 10, 14, 14].forEach((w, i) => { resumen.getColumn(i + 1).width = w; });
+
+  resumen.addRow([]);
+  resumen.addRow(["Tipo de inconsistencia", "Cantidad"]);
+  resumen.getRow(resumen.rowCount).font = { bold: true };
+  for (const [tipo, n] of porTipo) resumen.addRow([tipo, n]);
+  if (porTipo.size === 0) resumen.addRow(["Sin inconsistencias", 0]);
+  [44, 12, 12, 12, 30].forEach((w, i) => { resumen.getColumn(i + 1).width = w; });
+  [30, ...WIDTHS].forEach((w, i) => { inconsistencias.getColumn(i + 1).width = w; });
+  inconsistencias.views = [{ state: "frozen", ySplit: 1 }];
 
   return Buffer.from(await wb.xlsx.writeBuffer());
 }
