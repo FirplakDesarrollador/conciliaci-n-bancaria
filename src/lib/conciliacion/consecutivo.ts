@@ -1,6 +1,7 @@
 import "server-only";
 import ExcelJS from "exceljs";
 import { sapClient } from "@/lib/sap/service-layer";
+import { TRANSFER_ACCOUNT_NAMES } from "./config";
 
 // En 2026 el control arranca en octubre (decision del usuario, 2026-10-01:
 // setiembre ya quedo cerrado sin este control). Desde 2027 se genera un
@@ -14,14 +15,17 @@ export function controlFileName(year: number): string {
   return `CONTROL_CONSECUTIVO_PAGOS_${year}.xlsx`;
 }
 
-const FIELDS = "DocNum,DocEntry,Series,DocDate,Cancelled,CardName,TransferSum,CashSum,Remarks,JournalRemarks";
+const FIELDS = "DocNum,DocEntry,Series,DocDate,Cancelled,CardCode,CardName,TransferAccount,CashAccount,TransferSum,CashSum,Remarks,JournalRemarks";
 
 interface RawDoc {
   DocNum: number;
   Series: number;
   DocDate: string;
   Cancelled: string;
+  CardCode?: string;
   CardName?: string;
+  TransferAccount?: string | null;
+  CashAccount?: string | null;
   TransferSum?: number;
   CashSum?: number;
   Remarks?: string;
@@ -50,11 +54,41 @@ interface ControlRow {
   docNum: number;
   estado: "OK" | "CANCELADO" | "FALTANTE";
   fecha?: string;
+  banco?: string;
   tercero?: string;
   valor?: number;
 }
 
-function buildControlRows(docs: RawDoc[]): ControlRow[] {
+const FIDUCIA_ACCOUNT = "12450505";
+
+// Banco del documento: la cuenta de transferencia/caja de SAP traducida al
+// nombre del banco. En los traslados a Fiducia la cuenta de transferencia es
+// la de la Fiducia y el banco real viaja en CardCode (ver convertApiToSapDocs).
+function bancoDe(d: RawDoc, extraNames: Map<string, string>): string {
+  const nameOf = (code: string) => TRANSFER_ACCOUNT_NAMES[code] ?? extraNames.get(code) ?? code;
+  const acc = d.TransferAccount || d.CashAccount || "";
+  if (acc === FIDUCIA_ACCOUNT) {
+    return `${d.CardCode ? nameOf(d.CardCode) : ""} (traslado Fiducia)`.trim();
+  }
+  return nameOf(acc);
+}
+
+// Cuentas que no son bancos de TRANSFER_ACCOUNT_NAMES (ej. "CAJA CONFIRMING",
+// "CAJA TARJETA CREDITO") se traducen con el nombre del plan de cuentas.
+async function fetchAccountNames(codes: string[]): Promise<Map<string, string>> {
+  const names = new Map<string, string>();
+  const missing = [...new Set(codes)].filter((c) => c && !TRANSFER_ACCOUNT_NAMES[c] && c !== FIDUCIA_ACCOUNT);
+  for (let i = 0; i < missing.length; i += 15) {
+    const chunk = missing.slice(i, i + 15);
+    const filter = chunk.map((c) => `Code eq '${c}'`).join(" or ");
+    const res = await sapClient.request(`/ChartOfAccounts?$filter=${filter}&$select=Code,Name`);
+    if (!res.ok) continue;
+    for (const a of (await res.json()).value || []) names.set(a.Code, a.Name);
+  }
+  return names;
+}
+
+function buildControlRows(docs: RawDoc[], extraNames: Map<string, string>): ControlRow[] {
   const byDocNum = new Map<number, RawDoc>();
   for (const d of docs) byDocNum.set(d.DocNum, d);
   const nums = [...byDocNum.keys()];
@@ -73,6 +107,7 @@ function buildControlRows(docs: RawDoc[]): ControlRow[] {
       docNum: n,
       estado: d.Cancelled === "tYES" ? "CANCELADO" : "OK",
       fecha: d.DocDate.slice(0, 10),
+      banco: bancoDe(d, extraNames),
       tercero: d.CardName || "",
       valor: d.TransferSum || d.CashSum || 0,
     });
@@ -87,17 +122,17 @@ function monthNameEs(monthIndex0: number): string {
 
 function writeSheet(wb: ExcelJS.Workbook, name: string, rows: ControlRow[]) {
   const ws = wb.addWorksheet(name.slice(0, 31));
-  ws.addRow(["# Documento", "Estado", "Fecha", "Tercero", "Valor"]);
+  ws.addRow(["# Documento", "Estado", "Fecha", "Banco", "Tercero", "Valor"]);
   ws.getRow(1).font = { bold: true };
   for (const r of rows) {
-    const row = ws.addRow([r.docNum, r.estado, r.fecha ?? "", r.tercero ?? "", r.valor ?? ""]);
+    const row = ws.addRow([r.docNum, r.estado, r.fecha ?? "", r.banco ?? "", r.tercero ?? "", r.valor ?? ""]);
     if (r.estado === "FALTANTE") {
       row.eachCell((c) => { c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFFC7CE" } }; });
     } else if (r.estado === "CANCELADO") {
       row.eachCell((c) => { c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFFEB9C" } }; });
     }
   }
-  [14, 12, 12, 40, 16].forEach((w, i) => { ws.getColumn(i + 1).width = w; });
+  [14, 12, 12, 42, 40, 16].forEach((w, i) => { ws.getColumn(i + 1).width = w; });
 }
 
 /**
@@ -116,6 +151,13 @@ export async function buildConsecutivoWorkbook(year: number): Promise<Buffer> {
     fetchAllBetween("VendorPayments", from, to),
   ]);
 
+  const extraNames = await fetchAccountNames(
+    [...incoming, ...vendor].map((d) => {
+      const acc = d.TransferAccount || d.CashAccount || "";
+      return acc === FIDUCIA_ACCOUNT ? d.CardCode || "" : acc;
+    })
+  );
+
   const wb = new ExcelJS.Workbook();
 
   const byMonth = (docs: RawDoc[]) => {
@@ -132,7 +174,7 @@ export async function buildConsecutivoWorkbook(year: number): Promise<Buffer> {
   const incomingByMonth = byMonth(incoming);
   for (const [key, docs] of [...incomingByMonth.entries()].sort()) {
     const [, monthIdx] = key.split("-").map(Number);
-    const rows = buildControlRows(docs);
+    const rows = buildControlRows(docs, extraNames);
     writeSheet(wb, `Recibidos ${monthNameEs(monthIdx)}`, rows);
   }
 
@@ -145,7 +187,7 @@ export async function buildConsecutivoWorkbook(year: number): Promise<Buffer> {
     const byMonthForSeries = byMonth(docsOfSeries);
     for (const [key, docs] of [...byMonthForSeries.entries()].sort()) {
       const [, monthIdx] = key.split("-").map(Number);
-      const rows = buildControlRows(docs);
+      const rows = buildControlRows(docs, extraNames);
       writeSheet(wb, `Efectuados S${series} ${monthNameEs(monthIdx)}`, rows);
     }
   }
