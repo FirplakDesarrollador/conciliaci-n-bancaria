@@ -2,10 +2,17 @@ import "server-only";
 import ExcelJS from "exceljs";
 import { sapClient } from "@/lib/sap/service-layer";
 
-// A partir de esta fecha se vigila el consecutivo (decision del usuario,
-// 2026-10-01: "solo octubre en adelante", setiembre ya quedo cerrado sin
-// este control).
-export const CONTROL_START_DATE = "2026-10-01";
+// En 2026 el control arranca en octubre (decision del usuario, 2026-10-01:
+// setiembre ya quedo cerrado sin este control). Desde 2027 se genera un
+// archivo por ano, que cubre el ano completo y se guarda en la carpeta
+// "FIRPLAK <ano>" correspondiente.
+export function controlRangeForYear(year: number): { from: string; to: string } {
+  return { from: year === 2026 ? "2026-10-01" : `${year}-01-01`, to: `${year}-12-31` };
+}
+
+export function controlFileName(year: number): string {
+  return `CONTROL_CONSECUTIVO_PAGOS_${year}.xlsx`;
+}
 
 const FIELDS = "DocNum,DocEntry,Series,DocDate,Cancelled,CardName,TransferSum,CashSum,Remarks,JournalRemarks";
 
@@ -21,9 +28,13 @@ interface RawDoc {
   JournalRemarks?: string;
 }
 
-async function fetchAllSince(entity: "IncomingPayments" | "VendorPayments", fromDate: string): Promise<RawDoc[]> {
+async function fetchAllBetween(
+  entity: "IncomingPayments" | "VendorPayments",
+  fromDate: string,
+  toDate: string
+): Promise<RawDoc[]> {
   let all: RawDoc[] = [];
-  let next: string | null = `/${entity}?$filter=DocDate ge '${fromDate}'&$select=${FIELDS}&$orderby=DocNum`;
+  let next: string | null = `/${entity}?$filter=DocDate ge '${fromDate}' and DocDate le '${toDate}'&$select=${FIELDS}&$orderby=DocNum`;
   while (next) {
     const res = await sapClient.request(next);
     if (!res.ok) break;
@@ -98,10 +109,11 @@ function writeSheet(wb: ExcelJS.Workbook, name: string, rows: ControlRow[]) {
  * Una hoja por mes y por serie; dentro de cada hoja, cada numero entre el
  * minimo y el maximo visto queda marcado OK / CANCELADO / FALTANTE.
  */
-export async function buildConsecutivoWorkbook(): Promise<Buffer> {
+export async function buildConsecutivoWorkbook(year: number): Promise<Buffer> {
+  const { from, to } = controlRangeForYear(year);
   const [incoming, vendor] = await Promise.all([
-    fetchAllSince("IncomingPayments", CONTROL_START_DATE),
-    fetchAllSince("VendorPayments", CONTROL_START_DATE),
+    fetchAllBetween("IncomingPayments", from, to),
+    fetchAllBetween("VendorPayments", from, to),
   ]);
 
   const wb = new ExcelJS.Workbook();

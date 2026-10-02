@@ -1,18 +1,22 @@
 import { NextResponse } from "next/server";
-import { buildConsecutivoWorkbook } from "@/lib/conciliacion/consecutivo";
-import { uploadDriveFile } from "@/lib/graph/sharepoint";
+import { buildConsecutivoWorkbook, controlFileName } from "@/lib/conciliacion/consecutivo";
+import { driveFolderExists, folderPathForYear, uploadDriveFile } from "@/lib/graph/sharepoint";
 
 export const maxDuration = 60;
 
-const OUTPUT_FILE = "CONTROL_CONSECUTIVO_PAGOS.xlsx";
+function bogotaYear(): number {
+  return Number(new Intl.DateTimeFormat("en-CA", { timeZone: "America/Bogota", year: "numeric" }).format(new Date()));
+}
 
 /**
  * Regenera el archivo de control de consecutivo de pagos recibidos y
- * efectuados (ver src/lib/conciliacion/consecutivo.ts) y lo sube a
- * SharePoint, junto a los 5 archivos de banco. Corre por separado del cron
- * de sincronizacion (api/cron/sync) porque ese ya usa casi todo el tiempo
- * disponible de la funcion; sumarle otra consulta paginada a SAP arriesgaria
- * los dos. Protegido con el mismo CRON_SECRET.
+ * efectuados del ano en curso (ver src/lib/conciliacion/consecutivo.ts) y lo
+ * sube a la carpeta anual de SharePoint ("FIRPLAK <ano>"), junto a los
+ * archivos de banco de ese ano. Cada ano se genera su propio archivo en su
+ * propia carpeta; si la carpeta del ano nuevo aun no existe no se crea
+ * ninguna: se reporta y se reintenta en la siguiente corrida. Corre por
+ * separado del cron de sincronizacion (api/cron/sync) porque ese ya usa casi
+ * todo el tiempo disponible de la funcion. Protegido con el mismo CRON_SECRET.
  */
 export async function GET(request: Request) {
   const authHeader = request.headers.get("authorization");
@@ -21,9 +25,15 @@ export async function GET(request: Request) {
   }
 
   try {
-    const buffer = await buildConsecutivoWorkbook();
-    await uploadDriveFile(OUTPUT_FILE, buffer);
-    return NextResponse.json({ success: true, file: OUTPUT_FILE });
+    const year = bogotaYear();
+    const folder = folderPathForYear(year);
+    if (!(await driveFolderExists(folder))) {
+      return NextResponse.json({ success: false, error: `No existe la carpeta de SharePoint del ano ${year}: ${folder}` }, { status: 409 });
+    }
+    const buffer = await buildConsecutivoWorkbook(year);
+    const file = controlFileName(year);
+    await uploadDriveFile(file, buffer, folder);
+    return NextResponse.json({ success: true, file, folder });
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   } catch (error: any) {
     console.error("Error generando control de consecutivo:", error);

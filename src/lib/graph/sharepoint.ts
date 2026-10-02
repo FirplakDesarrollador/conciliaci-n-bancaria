@@ -35,9 +35,27 @@ export async function downloadDriveFile(fileName: string): Promise<Buffer> {
   return Buffer.from(await res.arrayBuffer());
 }
 
-export async function uploadDriveFile(fileName: string, content: Buffer): Promise<{ webUrl: string }> {
+/** Carpeta anual de SharePoint, ej. ".../FIRPLAK 2026" -> ".../FIRPLAK 2027". */
+export function folderPathForYear(year: number): string {
+  return CONCILIACION_FOLDER_PATH.replace(/FIRPLAK \d{4}$/, `FIRPLAK ${year}`);
+}
+
+export async function driveFolderExists(folderPath: string): Promise<boolean> {
   const token = await getGraphAccessToken();
-  const path = `${CONCILIACION_FOLDER_PATH}/${fileName}`;
+  const res = await fetch(
+    `${GRAPH_BASE_URL}/drives/${CONCILIACION_DRIVE_ID}/root:${encodeDrivePath(folderPath)}`,
+    { headers: { Authorization: `Bearer ${token}` }, cache: "no-store" }
+  );
+  return res.ok;
+}
+
+export async function uploadDriveFile(
+  fileName: string,
+  content: Buffer,
+  folderPath: string = CONCILIACION_FOLDER_PATH
+): Promise<{ webUrl: string }> {
+  const token = await getGraphAccessToken();
+  const path = `${folderPath}/${fileName}`;
   const res = await fetch(
     `${GRAPH_BASE_URL}/drives/${CONCILIACION_DRIVE_ID}/root:${encodeDrivePath(path)}:/content`,
     {
