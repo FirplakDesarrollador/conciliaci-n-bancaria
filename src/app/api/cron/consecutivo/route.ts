@@ -32,8 +32,20 @@ export async function GET(request: Request) {
     }
     const buffer = await buildConsecutivoWorkbook(year);
     const file = controlFileName(year);
-    await uploadDriveFile(file, buffer, folder);
-    return NextResponse.json({ success: true, file, folder });
+    try {
+      await uploadDriveFile(file, buffer, folder);
+      return NextResponse.json({ success: true, file, folder });
+    } catch (e) {
+      // Si alguien tiene el archivo abierto SharePoint lo bloquea (423). Para
+      // que el control diario nunca quede desactualizado se sube una copia
+      // con el sufijo ACTUALIZADO (se sobrescribe cada dia; el principal se
+      // vuelve a escribir apenas se cierre).
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      if (!String((e as any)?.message || e).includes("HTTP 423")) throw e;
+      const fallback = file.replace(/\.xlsx$/, "_ACTUALIZADO.xlsx");
+      await uploadDriveFile(fallback, buffer, folder);
+      return NextResponse.json({ success: true, file: fallback, folder, note: "El archivo principal estaba bloqueado (423); se subio la copia ACTUALIZADO." });
+    }
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   } catch (error: any) {
     console.error("Error generando control de consecutivo:", error);

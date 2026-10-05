@@ -51,6 +51,37 @@ async function fetchAllBetween(
   return all;
 }
 
+// Un documento puede crearse hoy con fecha anterior (ej. cierre del mes: DocNum
+// 82319 creado en octubre con DocDate 30-sep). Por fecha quedaria fuera de la
+// ventana y su numero se reportaria como FALTANTE. Para cada serie se
+// completa la corrida de numeracion con los documentos de esa serie cuyo
+// DocNum es >= al primero del periodo aunque su fecha sea anterior.
+async function withBackdatedDocs(
+  entity: "IncomingPayments" | "VendorPayments",
+  docs: RawDoc[],
+  fromDate: string
+): Promise<RawDoc[]> {
+  const minBySeries = new Map<number, number>();
+  for (const d of docs) {
+    const cur = minBySeries.get(d.Series);
+    if (cur === undefined || d.DocNum < cur) minBySeries.set(d.Series, d.DocNum);
+  }
+  const byNum = new Map<string, RawDoc>();
+  for (const d of docs) byNum.set(`${d.Series}:${d.DocNum}`, d);
+  for (const [series, min] of minBySeries) {
+    let next: string | null = `/${entity}?$filter=Series eq ${series} and DocNum ge ${min} and DocDate lt '${fromDate}'&$select=${FIELDS}&$orderby=DocNum`;
+    while (next) {
+      const res = await sapClient.request(next);
+      if (!res.ok) break;
+      const data = await res.json();
+      for (const d of (data.value || []) as RawDoc[]) byNum.set(`${d.Series}:${d.DocNum}`, d);
+      const link = data["odata.nextLink"];
+      next = link ? (String(link).startsWith("/") ? link : "/" + link) : null;
+    }
+  }
+  return [...byNum.values()];
+}
+
 const normalizeStr = (s: string) =>
   s.normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^A-Z0-9]/gi, "").toUpperCase();
 
@@ -254,7 +285,21 @@ async function fetchAccountNames(codes: string[]): Promise<Map<string, string>> 
   return names;
 }
 
-function buildControlRows(docs: RawDoc[], extraNames: Map<string, string>, index: BankIndex): ControlRow[] {
+interface KeyedRow {
+  monthKey: string;
+  row: ControlRow;
+}
+
+function monthKeyOf(isoDate: string): string {
+  const dt = new Date(isoDate);
+  return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth()).padStart(2, "0")}`;
+}
+
+// El consecutivo se revisa sobre TODA la corrida de numeracion de la serie
+// (de su menor a su mayor numero), no mes por mes; cada fila va luego a la hoja
+// del mes de su fecha. Un numero que no existe en SAP en ninguna fecha
+// (FALTANTE) se ubica en el mes del documento anterior de la secuencia.
+function buildSeriesRows(docs: RawDoc[], extraNames: Map<string, string>, index: BankIndex): KeyedRow[] {
   const byDocNum = new Map<number, RawDoc>();
   for (const d of docs) byDocNum.set(d.DocNum, d);
   const nums = [...byDocNum.keys()];
@@ -262,25 +307,30 @@ function buildControlRows(docs: RawDoc[], extraNames: Map<string, string>, index
   const min = Math.min(...nums);
   const max = Math.max(...nums);
 
-  const rows: ControlRow[] = [];
+  const rows: KeyedRow[] = [];
+  let lastKey = monthKeyOf(byDocNum.get(min)!.DocDate);
   for (let n = min; n <= max; n++) {
     const d = byDocNum.get(n);
     if (!d) {
-      rows.push({ docNum: n, estado: "FALTANTE" });
+      rows.push({ monthKey: lastKey, row: { docNum: n, estado: "FALTANTE" } });
       continue;
     }
+    lastKey = monthKeyOf(d.DocDate);
     const banco = bancoDe(d, extraNames);
     const v = validar(d, index, banco);
     rows.push({
-      docNum: n,
-      estado: d.Cancelled === "tYES" ? "CANCELADO" : "VIGENTE",
-      fecha: d.DocDate.slice(0, 10),
-      banco,
-      tercero: d.CardName || "",
-      valor: d.TransferSum || d.CashSum || 0,
-      conciliacion: v.conciliacion,
-      ubicacion: v.ubicacion,
-      observacion: v.observacion,
+      monthKey: lastKey,
+      row: {
+        docNum: n,
+        estado: d.Cancelled === "tYES" ? "CANCELADO" : "VIGENTE",
+        fecha: d.DocDate.slice(0, 10),
+        banco,
+        tercero: d.CardName || "",
+        valor: d.TransferSum || d.CashSum || 0,
+        conciliacion: v.conciliacion,
+        ubicacion: v.ubicacion,
+        observacion: v.observacion,
+      },
     });
   }
   return rows;
@@ -329,10 +379,14 @@ function writeSheet(wb: ExcelJS.Workbook, name: string, rows: ControlRow[]) {
  */
 export async function buildConsecutivoWorkbook(year: number): Promise<Buffer> {
   const { from, to } = controlRangeForYear(year);
-  const [incoming, vendor, index] = await Promise.all([
+  const [incomingBase, vendorBase, index] = await Promise.all([
     fetchAllBetween("IncomingPayments", from, to),
     fetchAllBetween("VendorPayments", from, to),
     buildBankIndex(year),
+  ]);
+  const [incoming, vendor] = await Promise.all([
+    withBackdatedDocs("IncomingPayments", incomingBase, from),
+    withBackdatedDocs("VendorPayments", vendorBase, from),
   ]);
 
   const extraNames = await fetchAccountNames(
@@ -345,21 +399,18 @@ export async function buildConsecutivoWorkbook(year: number): Promise<Buffer> {
   const wb = new ExcelJS.Workbook();
   const sheets: { name: string; rows: ControlRow[] }[] = [];
 
-  const byMonth = (docs: RawDoc[]) => {
-    const m = new Map<string, RawDoc[]>();
-    for (const d of docs) {
-      const dt = new Date(d.DocDate);
-      const key = `${dt.getUTCFullYear()}-${String(dt.getUTCMonth()).padStart(2, "0")}`;
-      if (!m.has(key)) m.set(key, []);
-      m.get(key)!.push(d);
+  const pushSheets = (prefix: string, keyed: KeyedRow[]) => {
+    const byKey = new Map<string, ControlRow[]>();
+    for (const k of keyed) {
+      if (!byKey.has(k.monthKey)) byKey.set(k.monthKey, []);
+      byKey.get(k.monthKey)!.push(k.row);
     }
-    return m;
+    for (const [key, rows] of [...byKey.entries()].sort()) {
+      sheets.push({ name: `${prefix} ${monthNameEs(Number(key.split("-")[1]))}`, rows });
+    }
   };
 
-  for (const [key, docs] of [...byMonth(incoming).entries()].sort()) {
-    const monthIdx = Number(key.split("-")[1]);
-    sheets.push({ name: `Recibidos ${monthNameEs(monthIdx)}`, rows: buildControlRows(docs, extraNames, index) });
-  }
+  pushSheets("Recibidos", buildSeriesRows(incoming, extraNames, index));
 
   const vendorBySeries = new Map<number, RawDoc[]>();
   for (const d of vendor) {
@@ -367,10 +418,7 @@ export async function buildConsecutivoWorkbook(year: number): Promise<Buffer> {
     vendorBySeries.get(d.Series)!.push(d);
   }
   for (const [series, docsOfSeries] of [...vendorBySeries.entries()].sort((a, b) => a[0] - b[0])) {
-    for (const [key, docs] of [...byMonth(docsOfSeries).entries()].sort()) {
-      const monthIdx = Number(key.split("-")[1]);
-      sheets.push({ name: `Efectuados S${series} ${monthNameEs(monthIdx)}`, rows: buildControlRows(docs, extraNames, index) });
-    }
+    pushSheets(`Efectuados S${series}`, buildSeriesRows(docsOfSeries, extraNames, index));
   }
 
   // Resumen
