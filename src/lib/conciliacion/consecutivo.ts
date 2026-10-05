@@ -299,7 +299,7 @@ function monthKeyOf(isoDate: string): string {
 // (de su menor a su mayor numero), no mes por mes; cada fila va luego a la hoja
 // del mes de su fecha. Un numero que no existe en SAP en ninguna fecha
 // (FALTANTE) se ubica en el mes del documento anterior de la secuencia.
-function buildSeriesRows(docs: RawDoc[], extraNames: Map<string, string>, index: BankIndex): KeyedRow[] {
+function buildSeriesRows(docs: RawDoc[], extraNames: Map<string, string>, index: BankIndex, fromDate: string): KeyedRow[] {
   const byDocNum = new Map<number, RawDoc>();
   for (const d of docs) byDocNum.set(d.DocNum, d);
   const nums = [...byDocNum.keys()];
@@ -315,9 +315,21 @@ function buildSeriesRows(docs: RawDoc[], extraNames: Map<string, string>, index:
       rows.push({ monthKey: lastKey, row: { docNum: n, estado: "FALTANTE" } });
       continue;
     }
-    lastKey = monthKeyOf(d.DocDate);
+    // Un documento con fecha anterior al periodo (creado hoy con fecha del mes
+    // pasado) queda en la hoja que le corresponde por su numero, para que el
+    // consecutivo de cada hoja este completo, y se anota donde se descargo.
+    const fechaSap = d.DocDate.slice(0, 10);
+    const retroactivo = fechaSap < fromDate;
+    if (!retroactivo) lastKey = monthKeyOf(d.DocDate);
     const banco = bancoDe(d, extraNames);
     const v = validar(d, index, banco);
+    if (retroactivo) {
+      const hojas = [...new Set((index.byDoc.get(String(n)) ?? []).map((l) => l.sheet))];
+      const nota =
+        `Documento con fecha SAP ${fechaSap} (anterior al periodo de control), creado dentro del periodo.` +
+        (hojas.length > 0 ? ` Descargado en ${hojas.join(" / ")}.` : "");
+      v.observacion = v.observacion ? `${nota} ${v.observacion}` : nota;
+    }
     rows.push({
       monthKey: lastKey,
       row: {
@@ -410,7 +422,7 @@ export async function buildConsecutivoWorkbook(year: number): Promise<Buffer> {
     }
   };
 
-  pushSheets("Recibidos", buildSeriesRows(incoming, extraNames, index));
+  pushSheets("Recibidos", buildSeriesRows(incoming, extraNames, index, from));
 
   const vendorBySeries = new Map<number, RawDoc[]>();
   for (const d of vendor) {
@@ -418,7 +430,7 @@ export async function buildConsecutivoWorkbook(year: number): Promise<Buffer> {
     vendorBySeries.get(d.Series)!.push(d);
   }
   for (const [series, docsOfSeries] of [...vendorBySeries.entries()].sort((a, b) => a[0] - b[0])) {
-    pushSheets(`Efectuados S${series}`, buildSeriesRows(docsOfSeries, extraNames, index));
+    pushSheets(`Efectuados S${series}`, buildSeriesRows(docsOfSeries, extraNames, index, from));
   }
 
   // Resumen
