@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { fetchSapPayments } from "@/lib/conciliacion/fetch-sap-payments";
 import { runFullSync } from "@/lib/conciliacion/auto-sync";
 
-export const maxDuration = 60;
+export const maxDuration = 300;
 
 /**
  * Corre el cruce SAP <-> bancos y escribe los matches en SharePoint sin
