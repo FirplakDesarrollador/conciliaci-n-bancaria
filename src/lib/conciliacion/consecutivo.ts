@@ -2,7 +2,7 @@ import "server-only";
 import ExcelJS from "exceljs";
 import { sapClient } from "@/lib/sap/service-layer";
 import { downloadDriveFile, folderPathForYear } from "@/lib/graph/sharepoint";
-import { ACCOUNT_MAP, MANUAL_CUENTA_OVERRIDES, TRANSFER_ACCOUNT_NAMES } from "./config";
+import { ACCOUNT_MAP, MANUAL_CUENTA_OVERRIDES, MIAMI_ACCOUNT, TRANSFER_ACCOUNT_NAMES } from "./config";
 import { findHeaderRowAndCols, READERS, REQUIRED_HEADERS_HINT } from "./readers";
 
 // En 2026 el control arranca en octubre (decision del usuario, 2026-10-01:
@@ -17,7 +17,7 @@ export function controlFileName(year: number): string {
   return `CONTROL_CONSECUTIVO_PAGOS_${year}.xlsx`;
 }
 
-const FIELDS = "DocNum,DocEntry,Series,DocDate,Cancelled,CardCode,CardName,TransferAccount,CashAccount,TransferSum,CashSum,Remarks,JournalRemarks";
+const FIELDS = "DocNum,DocEntry,Series,DocDate,Cancelled,CardCode,CardName,TransferAccount,CashAccount,TransferSum,CashSum,DocCurrency,DocRate,Remarks,JournalRemarks";
 const FIDUCIA_ACCOUNT = "12450505";
 
 interface RawDoc {
@@ -27,6 +27,8 @@ interface RawDoc {
   Cancelled: string;
   CardCode?: string;
   CardName?: string;
+  DocCurrency?: string;
+  DocRate?: number;
   TransferAccount?: string | null;
   CashAccount?: string | null;
   TransferSum?: number;
@@ -331,8 +333,21 @@ function buildSeriesRows(docs: RawDoc[], extraNames: Map<string, string>, index:
     const fechaSap = d.DocDate.slice(0, 10);
     const retroactivo = fechaSap < fromDate;
     if (!retroactivo) lastKey = monthKeyOf(d.DocDate);
-    const banco = bancoDe(d, extraNames);
+    // La cuenta de compensacion Miami opera en USD: sus movimientos de banco
+    // estan en dolares, asi que el documento se muestra en esa moneda
+    // (TransferSum de SAP viene en pesos a la tasa del documento).
+    const acc = d.TransferAccount || d.CashAccount || "";
+    const esMiami = accountKeyOf(acc) === MIAMI_ACCOUNT;
+    const totalCop = d.TransferSum || d.CashSum || 0;
+    const usd = d.DocCurrency === "USD" && (d.DocRate ?? 0) > 0 ? Math.round((totalCop / d.DocRate!) * 100) / 100 : null;
+    let banco = bancoDe(d, extraNames);
+    if (esMiami && usd !== null) banco = `${banco} (USD)`;
     const v = validar(d, index, banco);
+    // Traslado entre cuentas propias cuya otra pata es Miami (venta de dolares)
+    if (!esMiami && usd !== null && accountKeyOf(d.CardCode) === MIAMI_ACCOUNT) {
+      const nota = `Pata Miami: USD ${usd.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}.`;
+      v.observacion = v.observacion ? `${v.observacion} ${nota}` : nota;
+    }
     if (retroactivo) {
       const hojas = [...new Set((index.byDoc.get(String(n)) ?? []).map((l) => l.sheet))];
       const nota =
@@ -348,7 +363,7 @@ function buildSeriesRows(docs: RawDoc[], extraNames: Map<string, string>, index:
         fecha: d.DocDate.slice(0, 10),
         banco,
         tercero: d.CardName || "",
-        valor: d.TransferSum || d.CashSum || 0,
+        valor: esMiami && usd !== null ? usd : totalCop,
         conciliacion: v.conciliacion,
         ubicacion: v.ubicacion,
         observacion: v.observacion,
