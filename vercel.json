@@ -1,12 +1,12 @@
 {
   "crons": [
     {
-      "path": "/api/cron/sync",
-      "schedule": "0 * * * *"
+      "path": "/api/cron/consecutivo",
+      "schedule": "30 13 * * *"
     },
     {
-      "path": "/api/cron/consecutivo",
-      "schedule": "0 14 * * *"
+      "path": "/api/cron/sync",
+      "schedule": "45 13 * * *"
     }
   ]
 }
