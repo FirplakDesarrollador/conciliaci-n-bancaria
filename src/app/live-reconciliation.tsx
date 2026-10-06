@@ -94,7 +94,7 @@ export default async function LiveReconciliation({
     s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^A-Z0-9]/gi, "").toUpperCase();
 
   const sameMonth = (a: Date, b: Date) =>
-    a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth();
+    a.getUTCFullYear() === b.getUTCFullYear() && a.getUTCMonth() === b.getUTCMonth();
 
   // Una celda con documento ya puede traer un solo numero o una combinacion
   // ("81073, 81074", "81216-81217"); se extraen todos los numeros que
