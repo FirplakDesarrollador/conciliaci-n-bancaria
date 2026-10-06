@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
-import { buildConsecutivoWorkbook, controlFileName } from "@/lib/conciliacion/consecutivo";
-import { driveFolderExists, folderPathForYear, uploadDriveFile } from "@/lib/graph/sharepoint";
+import { syncConsecutivoFile } from "@/lib/conciliacion/consecutivo-sync";
+import { driveFolderExists, folderPathForYear } from "@/lib/graph/sharepoint";
 
 export const maxDuration = 300;
 
@@ -9,14 +9,14 @@ function bogotaYear(): number {
 }
 
 /**
- * Regenera el archivo de control de consecutivo de pagos recibidos y
- * efectuados del ano en curso (ver src/lib/conciliacion/consecutivo.ts) y lo
- * sube a la carpeta anual de SharePoint ("FIRPLAK <ano>"), junto a los
- * archivos de banco de ese ano. Cada ano se genera su propio archivo en su
- * propia carpeta; si la carpeta del ano nuevo aun no existe no se crea
- * ninguna: se reporta y se reintenta en la siguiente corrida. Corre por
- * separado del cron de sincronizacion (api/cron/sync) porque ese ya usa casi
- * todo el tiempo disponible de la funcion. Protegido con el mismo CRON_SECRET.
+ * Actualiza el archivo de control de consecutivo de pagos recibidos y
+ * efectuados del ano en curso, que vive en la carpeta anual de SharePoint
+ * ("FIRPLAK <ano>"). El archivo existente NUNCA se reemplaza: solo se
+ * actualizan los estados de las filas que ya estan y se agregan los
+ * documentos nuevos, para respetar las marcas manuales de verificacion
+ * (ver src/lib/conciliacion/consecutivo-sync.ts). Si la carpeta del ano
+ * nuevo aun no existe no se crea nada: se reporta y se reintenta en la
+ * siguiente corrida. Protegido con CRON_SECRET.
  */
 export async function GET(request: Request) {
   const authHeader = request.headers.get("authorization");
@@ -30,20 +30,11 @@ export async function GET(request: Request) {
     if (!(await driveFolderExists(folder))) {
       return NextResponse.json({ success: false, error: `No existe la carpeta de SharePoint del ano ${year}: ${folder}` }, { status: 409 });
     }
-    const buffer = await buildConsecutivoWorkbook(year);
-    const file = controlFileName(year);
-    await uploadDriveFile(file, buffer, folder);
-    return NextResponse.json({ success: true, file, folder });
+    const result = await syncConsecutivoFile(year);
+    return NextResponse.json({ success: true, folder, ...result });
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   } catch (error: any) {
-    console.error("Error generando control de consecutivo:", error);
-    const msg: string = error.message || String(error);
-    if (msg.includes("HTTP 423")) {
-      return NextResponse.json(
-        { success: false, error: "El archivo de control esta abierto/bloqueado en SharePoint (423): se trabaja con un solo archivo, asi que no se crea copia; se reintenta en la siguiente corrida." },
-        { status: 423 }
-      );
-    }
-    return NextResponse.json({ success: false, error: msg }, { status: 500 });
+    console.error("Error actualizando control de consecutivo:", error);
+    return NextResponse.json({ success: false, error: error.message || String(error) }, { status: 500 });
   }
 }

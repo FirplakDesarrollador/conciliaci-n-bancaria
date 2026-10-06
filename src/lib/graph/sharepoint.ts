@@ -306,3 +306,86 @@ export async function updateExcelCellsBatch(
   return { success: true, errors: [] };
 }
 
+export async function getDriveItemId(fileName: string, folderPath: string = CONCILIACION_FOLDER_PATH): Promise<string | null> {
+  const token = await getGraphAccessToken();
+  const res = await fetch(
+    `${GRAPH_BASE_URL}/drives/${CONCILIACION_DRIVE_ID}/root:${encodeDrivePath(`${folderPath}/${fileName}`)}`,
+    { headers: { Authorization: `Bearer ${token}` }, cache: "no-store" }
+  );
+  if (!res.ok) return null;
+  return (await res.json()).id as string;
+}
+
+/** Llamada suelta a la API de libros de Excel de un archivo (lectura o escritura). */
+export async function workbookCall(
+  itemId: string,
+  method: "GET" | "POST" | "PATCH",
+  relUrl: string,
+  body?: unknown
+): Promise<Response> {
+  const token = await getGraphAccessToken();
+  return fetch(`${GRAPH_BASE_URL}/drives/${CONCILIACION_DRIVE_ID}/items/${itemId}/workbook${relUrl}`, {
+    method,
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+    cache: "no-store",
+  });
+}
+
+/**
+ * Aplica una lista de cambios puntuales (PATCH de rangos/formatos) a un libro
+ * de Excel en SharePoint, en lotes de 20 y con reintentos. Nunca reemplaza el
+ * archivo: solo toca las celdas indicadas, asi que no pisa marcas ni colores
+ * que la gente haya puesto a mano en el resto del libro.
+ */
+export async function workbookPatchBatch(
+  itemId: string,
+  requests: { relUrl: string; body: unknown }[]
+): Promise<string[]> {
+  const token = await getGraphAccessToken();
+  const errors: string[] = [];
+  let sessionId: string | null = null;
+  try {
+    const sRes = await workbookCall(itemId, "POST", "/createSession", { persistChanges: true });
+    if (sRes.ok) sessionId = (await sRes.json()).id;
+  } catch {
+    // sin sesion exclusiva
+  }
+  const headers = { "Content-Type": "application/json", ...(sessionId ? { "workbook-session-id": sessionId } : {}) };
+  const all = requests.map((r, i) => ({
+    id: String(i + 1),
+    method: "PATCH",
+    url: `/drives/${CONCILIACION_DRIVE_ID}/items/${itemId}/workbook${r.relUrl}`,
+    body: r.body,
+    headers,
+  }));
+  for (let i = 0; i < all.length; i += 20) {
+    const batch = all.slice(i, i + 20);
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const res = await fetch(`${GRAPH_BASE_URL}/$batch`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ requests: batch }),
+      });
+      if (!res.ok) {
+        if ((res.status === 429 || res.status >= 500) && attempt < 3) { await sleep(2000 * attempt); continue; }
+        errors.push(`batch ${res.status}: ${await res.text()}`);
+        break;
+      }
+      const data = await res.json();
+      const failed = (data.responses || []).filter((r: { status: number }) => r.status >= 400);
+      const retryable = failed.some((r: { status: number }) => r.status === 429 || r.status >= 500);
+      if (retryable && attempt < 3) { await sleep(2000 * attempt); continue; }
+      for (const f of failed) errors.push(`${f.status}: ${JSON.stringify(f.body).slice(0, 200)}`);
+      break;
+    }
+    if (i + 20 < all.length) await sleep(500);
+  }
+  if (sessionId) {
+    await fetch(`${GRAPH_BASE_URL}/drives/${CONCILIACION_DRIVE_ID}/items/${itemId}/workbook/closeSession`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "workbook-session-id": sessionId },
+    }).catch(() => undefined);
+  }
+  return errors;
+}

@@ -62,14 +62,18 @@ async function withBackdatedDocs(
   fromDate: string
 ): Promise<RawDoc[]> {
   const minBySeries = new Map<number, number>();
+  const maxBySeries = new Map<number, number>();
   for (const d of docs) {
     const cur = minBySeries.get(d.Series);
     if (cur === undefined || d.DocNum < cur) minBySeries.set(d.Series, d.DocNum);
+    const mx = maxBySeries.get(d.Series);
+    if (mx === undefined || d.DocNum > mx) maxBySeries.set(d.Series, d.DocNum);
   }
   const byNum = new Map<string, RawDoc>();
   for (const d of docs) byNum.set(`${d.Series}:${d.DocNum}`, d);
   for (const [series, min] of minBySeries) {
-    let next: string | null = `/${entity}?$filter=Series eq ${series} and DocNum ge ${min} and DocDate lt '${fromDate}'&$select=${FIELDS}&$orderby=DocNum`;
+    const max = maxBySeries.get(series)!;
+    let next: string | null = `/${entity}?$filter=Series eq ${series} and DocNum ge ${min} and DocNum le ${max} and DocDate lt '${fromDate}'&$select=${FIELDS}&$orderby=DocNum`;
     while (next) {
       const res = await sapClient.request(next);
       if (!res.ok) break;
@@ -173,7 +177,7 @@ function expectedBanks(d: RawDoc): string[] {
   return [...keys];
 }
 
-const PROBLEMAS = new Set([
+export const PROBLEMAS = new Set([
   "NO DESCARGADO",
   "DESCARGA PARCIAL",
   "BANCO DISTINTO",
@@ -246,7 +250,7 @@ function validar(d: RawDoc, index: BankIndex, bancoSap: string): Validacion {
 // Consecutivo + nombres de banco
 // ---------------------------------------------------------------------------
 
-interface ControlRow {
+export interface ControlRow {
   docNum: number;
   estado: "VIGENTE" | "CANCELADO" | "FALTANTE";
   fecha?: string;
@@ -306,6 +310,12 @@ function buildSeriesRows(docs: RawDoc[], extraNames: Map<string, string>, index:
   if (nums.length === 0) return [];
   const min = Math.min(...nums);
   const max = Math.max(...nums);
+  // Proteccion: una serie con numeracion saltada de millones no es un consecutivo
+  // revisable (y generaria millones de filas); se omite en vez de agotar memoria.
+  if (max - min > 20000) {
+    console.error(`Control consecutivo: serie omitida, rango ${min}-${max} demasiado amplio`);
+    return [];
+  }
 
   const rows: KeyedRow[] = [];
   let lastKey = monthKeyOf(byDocNum.get(min)!.DocDate);
@@ -353,43 +363,18 @@ function monthNameEs(monthIndex0: number): string {
   return names[monthIndex0];
 }
 
-const COLUMNS = ["# Documento", "Estado", "Fecha", "Banco SAP", "Tercero", "Valor", "Conciliacion", "Ubicacion en bancos", "Observacion"];
-const WIDTHS = [14, 12, 12, 42, 40, 16, 30, 50, 60];
-
-function styleRow(row: ExcelJS.Row, r: ControlRow) {
-  const problem = r.estado === "FALTANTE" || (r.conciliacion !== undefined && PROBLEMAS.has(r.conciliacion));
-  const argb = problem ? "FFFFC7CE" : r.estado === "CANCELADO" ? "FFFFEB9C" : null;
-  if (!argb) return;
-  row.eachCell((c) => { c.fill = { type: "pattern", pattern: "solid", fgColor: { argb } }; });
-}
-
-function writeSheet(wb: ExcelJS.Workbook, name: string, rows: ControlRow[]) {
-  const ws = wb.addWorksheet(name.slice(0, 31));
-  ws.addRow(COLUMNS);
-  ws.getRow(1).font = { bold: true };
-  for (const r of rows) {
-    const row = ws.addRow([
-      r.docNum, r.estado, r.fecha ?? "", r.banco ?? "", r.tercero ?? "", r.valor ?? "",
-      r.conciliacion ?? "", r.ubicacion ?? "", r.observacion ?? "",
-    ]);
-    styleRow(row, r);
-  }
-  WIDTHS.forEach((w, i) => { ws.getColumn(i + 1).width = w; });
-  ws.views = [{ state: "frozen", ySplit: 1 }];
-}
+export const COLUMNS = ["# Documento", "Estado", "Fecha", "Banco SAP", "Tercero", "Valor", "Conciliacion", "Ubicacion en bancos", "Observacion"];
+export const WIDTHS = [14, 12, 12, 42, 40, 16, 30, 50, 60];
 
 /**
- * Archivo de control de pagos recibidos (IncomingPayments, serie 151) y
- * efectuados (VendorPayments, varias series independientes: 70, 71, -1...;
- * el consecutivo se revisa POR SERIE). Una hoja por mes y por serie; cada
+ * Datos del control: una hoja por mes y por serie (recibidos serie 151,
+ * efectuados series 70, 71, -1...; el consecutivo se revisa POR SERIE). Cada
  * numero entre el minimo y el maximo visto queda VIGENTE / CANCELADO /
  * FALTANTE, y cada documento vigente se valida contra los archivos de banco
- * del ano: Descargado, NO DESCARGADO, DESCARGA PARCIAL, BANCO DISTINTO (error
- * de banco asignado en SAP), VARIAS FILAS, o CANCELADO AUN DESCARGADO. Las
- * cuentas sin archivo de banco (cajas) quedan "No aplica". Las filas con
- * inconsistencias van en rojo y se repiten en la hoja "Inconsistencias".
+ * del ano (Descargado, NO DESCARGADO, DESCARGA PARCIAL, BANCO DISTINTO,
+ * VARIAS FILAS, CANCELADO AUN DESCARGADO; las cajas son No aplica).
  */
-export async function buildConsecutivoWorkbook(year: number): Promise<Buffer> {
+export async function buildConsecutivoSheets(year: number): Promise<{ name: string; rows: ControlRow[] }[]> {
   const { from, to } = controlRangeForYear(year);
   const [incomingBase, vendorBase, index] = await Promise.all([
     fetchAllBetween("IncomingPayments", from, to),
@@ -408,9 +393,7 @@ export async function buildConsecutivoWorkbook(year: number): Promise<Buffer> {
     })
   );
 
-  const wb = new ExcelJS.Workbook();
   const sheets: { name: string; rows: ControlRow[] }[] = [];
-
   const pushSheets = (prefix: string, keyed: KeyedRow[]) => {
     const byKey = new Map<string, ControlRow[]>();
     for (const k of keyed) {
@@ -432,48 +415,6 @@ export async function buildConsecutivoWorkbook(year: number): Promise<Buffer> {
   for (const [series, docsOfSeries] of [...vendorBySeries.entries()].sort((a, b) => a[0] - b[0])) {
     pushSheets(`Efectuados S${series}`, buildSeriesRows(docsOfSeries, extraNames, index, from));
   }
-
-  // Resumen
-  const resumen = wb.addWorksheet("Resumen");
-  resumen.addRow(["Hoja", "Vigentes", "Cancelados", "Faltantes", "Inconsistencias de conciliacion"]);
-  resumen.getRow(1).font = { bold: true };
-  const porTipo = new Map<string, number>();
-  const inconsistencias = wb.addWorksheet("Inconsistencias");
-  inconsistencias.addRow(["Hoja", ...COLUMNS]);
-  inconsistencias.getRow(1).font = { bold: true };
-
-  for (const sh of sheets) {
-    let vig = 0, canc = 0, falt = 0, inc = 0;
-    for (const r of sh.rows) {
-      if (r.estado === "VIGENTE") vig++;
-      else if (r.estado === "CANCELADO") canc++;
-      else falt++;
-      const problema = r.estado === "FALTANTE" || (r.conciliacion !== undefined && PROBLEMAS.has(r.conciliacion));
-      if (r.conciliacion && PROBLEMAS.has(r.conciliacion)) {
-        inc++;
-        porTipo.set(r.conciliacion, (porTipo.get(r.conciliacion) ?? 0) + 1);
-      }
-      if (r.estado === "FALTANTE") porTipo.set("NUMERO FALTANTE EN EL CONSECUTIVO", (porTipo.get("NUMERO FALTANTE EN EL CONSECUTIVO") ?? 0) + 1);
-      if (problema) {
-        const row = inconsistencias.addRow([
-          sh.name, r.docNum, r.estado, r.fecha ?? "", r.banco ?? "", r.tercero ?? "", r.valor ?? "",
-          r.estado === "FALTANTE" ? "NUMERO FALTANTE" : r.conciliacion ?? "", r.ubicacion ?? "", r.observacion ?? "",
-        ]);
-        row.eachCell((c) => { c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFFC7CE" } }; });
-      }
-    }
-    resumen.addRow([sh.name, vig, canc, falt, inc]);
-    writeSheet(wb, sh.name, sh.rows);
-  }
-
-  resumen.addRow([]);
-  resumen.addRow(["Tipo de inconsistencia", "Cantidad"]);
-  resumen.getRow(resumen.rowCount).font = { bold: true };
-  for (const [tipo, n] of porTipo) resumen.addRow([tipo, n]);
-  if (porTipo.size === 0) resumen.addRow(["Sin inconsistencias", 0]);
-  [44, 12, 12, 12, 30].forEach((w, i) => { resumen.getColumn(i + 1).width = w; });
-  [30, ...WIDTHS].forEach((w, i) => { inconsistencias.getColumn(i + 1).width = w; });
-  inconsistencias.views = [{ state: "frozen", ySplit: 1 }];
-
-  return Buffer.from(await wb.xlsx.writeBuffer());
+  return sheets;
 }
+
