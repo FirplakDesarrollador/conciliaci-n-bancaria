@@ -2,6 +2,28 @@ import 'server-only';
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
 
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// El Service Layer de SAP falla de forma intermitente (502 del proxy,
+// conexiones reiniciadas). Un fallo pasajero no debe tumbar una sincronizacion
+// completa: se reintenta con espera creciente antes de rendirse.
+async function fetchWithRetry(url: string, init: RequestInit, attempts = 4): Promise<Response> {
+  let lastError: unknown;
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      const res = await fetch(url, init);
+      if (res.status !== 502 && res.status !== 503 && res.status !== 504) return res;
+      lastError = new Error(`SAP respondio ${res.status}`);
+      if (i === attempts) return res;
+    } catch (e) {
+      lastError = e;
+      if (i === attempts) throw e;
+    }
+    await sleep(2000 * i);
+  }
+  throw lastError;
+}
+
 export class SAPServiceLayer {
   private static instance: SAPServiceLayer;
   private sessionId: string | null = null;
@@ -27,7 +49,7 @@ export class SAPServiceLayer {
     }
 
     try {
-      const response = await fetch(`${baseUrl}/Login?_t=${Date.now()}`, {
+      const response = await fetchWithRetry(`${baseUrl}/Login?_t=${Date.now()}`, {
         method: 'POST',
         cache: 'no-store',
         headers: {
@@ -87,7 +109,7 @@ export class SAPServiceLayer {
       headers,
     };
 
-    let response = await fetch(url, fetchOptions);
+    let response = await fetchWithRetry(url, fetchOptions);
 
     let shouldRetry = false;
     if (response.status === 401) {
@@ -113,7 +135,7 @@ export class SAPServiceLayer {
       retryHeaders.set('Content-Type', 'application/json');
       retryHeaders.set('Cookie', `B1SESSION=${this.sessionId}; ROUTEID=${this.routeId}`);
       
-      response = await fetch(url, {
+      response = await fetchWithRetry(url, {
         ...fetchOptions,
         headers: retryHeaders,
       });
