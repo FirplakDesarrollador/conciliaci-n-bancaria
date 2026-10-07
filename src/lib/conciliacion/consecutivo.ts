@@ -99,6 +99,8 @@ interface Loc {
   bankKey: string;
   sheet: string;
   row: number;
+  /** la celda del banco lista varios documentos (asignacion por grupo/combo) */
+  grupo: boolean;
 }
 
 interface BankIndex {
@@ -139,10 +141,10 @@ async function buildBankIndex(year: number): Promise<BankIndex> {
           if (seenRows.has(mv.row)) continue;
           seenRows.add(mv.row);
           if (mv.docValue === null || mv.docValue === undefined || mv.docValue === "") continue;
-          for (const num of String(mv.docValue).match(/\d+/g) ?? []) {
-            if (num.length < 5) continue;
+          const nums = (String(mv.docValue).match(/\d+/g) ?? []).filter((n) => n.length >= 5);
+          for (const num of nums) {
             if (!byDoc.has(num)) byDoc.set(num, []);
-            byDoc.get(num)!.push({ bankKey, sheet: ws.name, row: mv.row });
+            byDoc.get(num)!.push({ bankKey, sheet: ws.name, row: mv.row, grupo: nums.length > 1 });
           }
         }
       }
@@ -240,7 +242,14 @@ function validar(d: RawDoc, index: BankIndex, bancoSap: string): Validacion {
   }
 
   for (const k of banksCovered) {
-    const rows = new Set(inExpected.filter((l) => l.bankKey === k).map((l) => `${l.sheet}!${l.row}`));
+    const enBanco = inExpected.filter((l) => l.bankKey === k);
+    const rows = new Set(enBanco.map((l) => `${l.sheet}!${l.row}`));
+    // Varias filas con el documento listado junto a otros = asignacion por grupo
+    // (ej. reembolsos de caja menor contra varios retiros de cajero): es el
+    // diseno, no un duplicado.
+    if (rows.size > 1 && enBanco.every((l) => l.grupo)) {
+      return { conciliacion: "Descargado", ubicacion, observacion: `Descargado en grupo: el documento comparte ${rows.size} filas de ${k} con otros documentos (categoria con varios movimientos).` };
+    }
     if (rows.size > 1) {
       return { conciliacion: "VARIAS FILAS", ubicacion, observacion: `El mismo documento esta en ${rows.size} filas de ${k}.` };
     }
