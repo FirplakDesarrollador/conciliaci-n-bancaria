@@ -76,13 +76,20 @@ export async function runFullSync(sapPayments: any[], vendorPayments: any[]) {
 
     // 3. Descargar buffers
     const bankBuffers = new Map<string, Buffer>();
+    const downloadErrors: Record<string, string> = {};
     await Promise.allSettled(Array.from(activeAccountKeys).map(async (accountKey) => {
-      try {
-        const configInfo = ACCOUNT_MAP[accountKey];
-        const buffer = await downloadDriveFile(configInfo.file);
-        bankBuffers.set(accountKey, buffer);
-      } catch (e) {
-        console.error(`Error downloading ${accountKey}:`, e);
+      const configInfo = ACCOUNT_MAP[accountKey];
+      // SharePoint responde 503/429 de forma transitoria: se reintenta antes
+      // de dar el banco por perdido.
+      for (let attempt = 1; attempt <= 4; attempt++) {
+        try {
+          bankBuffers.set(accountKey, await downloadDriveFile(configInfo.file));
+          return;
+        } catch (e) {
+          console.error(`Error downloading ${accountKey} (intento ${attempt}):`, e);
+          downloadErrors[accountKey] = e instanceof Error ? e.message : String(e);
+          if (attempt < 4) await new Promise((r) => setTimeout(r, 3000 * attempt));
+        }
       }
     }));
 
@@ -126,7 +133,13 @@ export async function runFullSync(sapPayments: any[], vendorPayments: any[]) {
       }
     }));
 
-    return { success: true, updateResults };
+    // Un banco cuyo archivo no se pudo bajar NO se procesó: se informa en vez
+    // de dejarlo pasar como un exito silencioso.
+    for (const [accountKey, msg] of Object.entries(downloadErrors)) {
+      if (!bankBuffers.has(accountKey)) updateResults[accountKey] = { status: "ERROR", error: `No se pudo descargar el archivo del banco: ${msg}` };
+    }
+    const failed = Object.values(updateResults).some((r) => r.status === "ERROR");
+    return { success: !failed, updateResults };
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   } catch (error: any) {
     console.error("Error en runFullSync:", error);
