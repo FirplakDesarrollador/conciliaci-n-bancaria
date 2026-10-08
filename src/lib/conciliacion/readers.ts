@@ -296,16 +296,24 @@ export const REQUIRED_HEADERS_HINT: Record<BankFormat, readonly string[]> = {
   bancolombia: ["VALOR"],
 };
 
+const SHEET_MONTHS = ["ENERO", "FEBRERO", "MARZO", "ABRIL", "MAYO", "JUNIO", "JULIO", "AGOSTO", "SEPTIEMBRE", "OCTUBRE", "NOVIEMBRE", "DICIEMBRE"];
+
 /**
  * La cuenta de compensación en Miami trae un bloque de fechas exportadas
  * como objetos de fecha con día y mes invertidos (ej. aparece "6 de mayo"
  * cuando en realidad es "5 de junio"). Se corrige intercambiando mes y día
- * solo quando el intercambio produce una fecha válida (día original <= 12),
- * igual que hacía el script original con openpyxl.
+ * solo cuando el intercambio produce una fecha válida (día original <= 12).
+ *
+ * Cada hoja es un mes (JUNIO, OCTUBRE...): una fecha cuyo mes YA coincide con
+ * el de la hoja esta bien y NO se toca. Intercambiar a ciegas movia al mes
+ * equivocado todas las fechas del 1 al 12 de un mes sano (1-oct -> 10-ene) y
+ * ningun movimiento de octubre cruzaba con SAP. Si la hoja no es un mes, se
+ * conserva el comportamiento anterior.
  */
 export function fixCompensacionDates(wb: ExcelJS.Workbook): number {
   let nFixed = 0;
   wb.eachSheet((ws) => {
+    const sheetMonth = SHEET_MONTHS.indexOf(ws.name.trim().toUpperCase()) + 1; // 0 si no es un mes
     for (let r = 1; r <= ws.rowCount; r++) {
       const row = ws.getRow(r);
       for (let c = 1; c <= 2; c++) {
@@ -315,12 +323,13 @@ export function fixCompensacionDates(wb: ExcelJS.Workbook): number {
           const year = v.getUTCFullYear();
           const month = v.getUTCMonth() + 1;
           const day = v.getUTCDate();
-          if (day <= 12) {
-            const nuevo = new Date(Date.UTC(year, day - 1, month));
-            if (nuevo.getTime() !== v.getTime()) {
-              cell.value = nuevo;
-              nFixed++;
-            }
+          if (day > 12) continue;
+          if (sheetMonth && month === sheetMonth) continue;
+          if (sheetMonth && day !== sheetMonth) continue;
+          const nuevo = new Date(Date.UTC(year, day - 1, month));
+          if (nuevo.getTime() !== v.getTime()) {
+            cell.value = nuevo;
+            nFixed++;
           }
         }
       }
