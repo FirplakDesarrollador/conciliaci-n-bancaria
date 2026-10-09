@@ -5,6 +5,7 @@ import {
   applyCountMatching,
   applyGroupTotalMatch,
   applyReverseCombo,
+  bestByNit,
   bestByTercero,
   findCandidates,
   tryMultiMatch,
@@ -155,6 +156,7 @@ export async function reconcileDocs(pool: SapDoc[], bankBuffers: Map<string, Buf
       stats.matchGrupo += nGrp0;
       writes.push(...writesGrp0);
       const nomatchMoves: BankMove[] = [];
+      const deferredAmbiguous: { mv: BankMove; toleranceDays: number | undefined; cuentaForMatch: string | string[]; poolForMatch: SapDoc[] }[] = [];
 
       // Se procesa primero el movimiento cuyo mejor documento candidato esta
       // mas cerca en fecha (no por orden de fila). Si dos movimientos tienen
@@ -350,7 +352,8 @@ export async function reconcileDocs(pool: SapDoc[], bankBuffers: Map<string, Buf
           continue;
         }
 
-        const [bestDoc] = bestByTercero(candidates, mv.refText);
+        const [bestByName] = bestByTercero(candidates, mv.refText);
+        const bestDoc = bestByName ?? bestByNit(candidates, mv.refText);
         if (bestDoc) {
           bestDoc.used = true;
           bestDoc.usedBy = `${fname}!${ws.name}!R${mv.row}`;
@@ -384,12 +387,33 @@ export async function reconcileDocs(pool: SapDoc[], bankBuffers: Map<string, Buf
           continue;
         }
 
-        const candidatosTxt = candidates
+        // Se difiere: otra fila puede quedarse con uno de los candidatos y
+        // dejar a este movimiento con un unico documento posible (dos abonos
+        // del mismo valor, dos recibos del mismo valor). Se reintenta abajo.
+        deferredAmbiguous.push({ mv, toleranceDays, cuentaForMatch, poolForMatch });
+      }
+
+      for (const { mv, toleranceDays, cuentaForMatch, poolForMatch } of deferredAmbiguous) {
+        const [candidates2, how2] = findCandidates(poolForMatch, mv.tipo, cuentaForMatch, mv.value, mv.date, toleranceDays);
+        const cell2 = ws.getRow(mv.row).getCell(mv.docCol);
+        let pick: SapDoc | null = null;
+        if (candidates2.length === 1) pick = candidates2[0];
+        else if (candidates2.length > 1) pick = bestByTercero(candidates2, mv.refText)[0] ?? bestByNit(candidates2, mv.refText);
+        if (pick) {
+          pick.used = true;
+          pick.usedBy = `${fname}!${ws.name}!R${mv.row}`;
+          cell2.value = pick.docNum;
+          writes.push({ sheet: ws.name, row: mv.row, col: mv.docCol, value: pick.docNum });
+          setFill(cell2, FILL_MATCHED);
+          if (how2 === "exacta") stats.matchExacto++;
+          else if (how2 === "tolerancia") stats.matchTolerancia++;
+          else stats.matchValorUnico++;
+          continue;
+        }
+        const candidatosTxt = candidates2
           .slice(0, 6)
           .map((d) => `#${d.docNum} (${d.tercero})`)
           .join(", ");
-        
-        // Ya no pintamos la celda de amarillo
         stats.ambiguos++;
         summaryRows.push({
           cuentaSap: accountKey,

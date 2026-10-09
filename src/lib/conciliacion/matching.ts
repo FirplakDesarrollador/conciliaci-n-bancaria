@@ -175,6 +175,24 @@ export function bestByTercero(candidates: SapDoc[], refText: string): [SapDoc | 
 }
 
 /**
+ * Desempata candidatos por NIT: muchos abonos bancarios traen el NIT del
+ * pagador en el detalle ("CON NIT 900204498") aunque el nombre del banco sea
+ * una sigla que no se parece al tercero de SAP (ARECONSA SAS vs ARRENDAMIENTO
+ * DE EQUIPOS Y CONSTRUCCIONES S A S), y el codigo de cliente de SAP lleva ese
+ * mismo NIT (CN900204498-01, visible en el comentario del documento). Solo
+ * decide si exactamente UN candidato coincide.
+ */
+export function bestByNit(candidates: SapDoc[], refText: string): SapDoc | null {
+  const nits = new Set((refText.match(/\d{6,}/g) ?? []).map((n) => n.replace(/^0+/, "")));
+  if (nits.size === 0) return null;
+  const hits = candidates.filter((d) => {
+    const codes = (d.comentario.match(/\d{6,}/g) ?? []).map((n) => n.replace(/^0+/, ""));
+    return codes.some((c) => nits.has(c));
+  });
+  return hits.length === 1 ? hits[0] : null;
+}
+
+/**
  * Agrupa movimientos por (tipo, cuenta, valor, filtro de tercero). Si la
  * cantidad de movimientos coincide (o casi) con la cantidad de documentos
  * SAP disponibles de ese mismo valor en la cuenta, los empareja por fecha
