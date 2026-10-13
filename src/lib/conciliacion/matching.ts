@@ -193,6 +193,46 @@ export function bestByNit(candidates: SapDoc[], refText: string): SapDoc | null 
 }
 
 /**
+ * Cuantos apellidos/nombres (palabras de 4+ letras) comparten el tercero de
+ * SAP y el detalle del banco. Sirve para repartir un lote de documentos de
+ * igual valor y fecha entre sus movimientos cuando el cruce exacto no existe.
+ */
+export function sharedNameTokens(tercero: string, refText: string): number {
+  const tokens = (t: string) => new Set(norm(t).split(/[^A-Z0-9]+/).filter((w) => w.length >= 4));
+  const a = tokens(tercero);
+  let n = 0;
+  for (const w of tokens(refText)) if (a.has(w)) n++;
+  return n;
+}
+
+/**
+ * Reparte un lote: N movimientos del mismo valor y fecha frente a EXACTAMENTE
+ * N documentos del mismo valor y fecha (ej. 4 pagos de ayuda del mismo monto).
+ * El conjunto es correcto; solo falta decidir el emparejamiento, que se hace
+ * de forma voraz por nombres compartidos y, si no hay pistas, por orden de
+ * fila y de numero de documento.
+ */
+export function pairBatch(moves: BankMove[], docs: SapDoc[]): Map<number, SapDoc> {
+  const pairs: { mi: number; di: number; score: number }[] = [];
+  moves.forEach((mv, mi) =>
+    docs.forEach((d, di) =>
+      pairs.push({ mi, di, score: sharedNameTokens(d.tercero, mv.refText) * 10 + sequenceRatio(d.tercero, mv.refText) })
+    )
+  );
+  pairs.sort((x, y) => y.score - x.score || x.mi - y.mi || x.di - y.di);
+  const usedM = new Set<number>();
+  const usedD = new Set<number>();
+  const out = new Map<number, SapDoc>();
+  for (const p of pairs) {
+    if (usedM.has(p.mi) || usedD.has(p.di)) continue;
+    usedM.add(p.mi);
+    usedD.add(p.di);
+    out.set(moves[p.mi].row, docs[p.di]);
+  }
+  return out;
+}
+
+/**
  * Agrupa movimientos por (tipo, cuenta, valor, filtro de tercero). Si la
  * cantidad de movimientos coincide (o casi) con la cantidad de documentos
  * SAP disponibles de ese mismo valor en la cuenta, los empareja por fecha
