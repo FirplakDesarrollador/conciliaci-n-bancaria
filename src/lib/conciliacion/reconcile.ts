@@ -227,7 +227,7 @@ export async function reconcileDocs(pool: SapDoc[], bankBuffers: Map<string, Buf
         for (const docsT of byTercero.values()) {
           if (docsT.length < 2) continue;
           if (docsT.reduce((sum, d) => sum + d.value, 0) < mv.value - 0.005) continue;
-          const c = tryMultiMatch(docsT, mv.tipo, cuentaEx, mv.value, mv.date, undefined, undefined, 8, 0.005);
+          const c = tryMultiMatch(docsT, mv.tipo, cuentaEx, mv.value, mv.date, undefined, undefined, 8, 0.005, true);
           if (c) exactCombos.push(c);
         }
         if (exactCombos.length !== 1) continue;

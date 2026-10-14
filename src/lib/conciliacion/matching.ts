@@ -74,7 +74,8 @@ export function tryMultiMatch(
   dateWindow?: number,
   sizes?: number[],
   maxComboSize = 8,
-  tolerance: number = MULTI_VALUE_TOLERANCE
+  tolerance: number = MULTI_VALUE_TOLERANCE,
+  singleGroup = false
 ): SapDoc[] | null {
   const window = dateWindow !== undefined ? dateWindow : Math.max(DATE_TOLERANCE_DAYS, 10);
   const allowed = new Set(typeof cuenta === "string" ? [cuenta] : cuenta);
@@ -83,7 +84,7 @@ export function tryMultiMatch(
       !d.used &&
       d.tipo === tipo &&
       allowed.has(d.cuenta) &&
-      d.infoDetallada &&
+      (singleGroup || d.infoDetallada) &&
       sameMonth(d.date, fecha) &&
       Math.abs(daysBetween(d.date, fecha)) <= window
   );
@@ -91,7 +92,10 @@ export function tryMultiMatch(
 
   const groups = new Map<string, SapDoc[]>();
   for (const d of candidates) {
-    const code = infoCode(d.infoDetallada);
+    // singleGroup: el llamador ya filtro por tercero, asi que los documentos
+    // se combinan sin importar el codigo de 'Info detallada' (un mismo
+    // proveedor puede pagarse con AC<nit> y PN<nit> en un solo debito).
+    const code = singleGroup ? "*" : infoCode(d.infoDetallada);
     if (code) {
       if (!groups.has(code)) groups.set(code, []);
       groups.get(code)!.push(d);
