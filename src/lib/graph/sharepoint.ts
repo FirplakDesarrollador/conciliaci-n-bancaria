@@ -20,13 +20,33 @@ function encodeDrivePath(path: string): string {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/**
+ * fetch con reintentos para fallas transitorias de Graph/SharePoint (429,
+ * 502, 503, 504 y errores de red). Una sola respuesta 503 no debe tumbar la
+ * corrida automatica de las 8:30/8:45, que nadie esta mirando.
+ */
+async function fetchRetry(url: string, init: RequestInit, attempts = 4): Promise<Response> {
+  let lastErr: unknown;
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      const res = await fetch(url, init);
+      if (![429, 502, 503, 504].includes(res.status) || i === attempts) return res;
+    } catch (e) {
+      lastErr = e;
+      if (i === attempts) throw e;
+    }
+    await sleep(2000 * i);
+  }
+  throw lastErr;
+}
+
 export async function downloadDriveFile(
   fileName: string,
   folderPath: string = CONCILIACION_FOLDER_PATH
 ): Promise<Buffer> {
   const token = await getGraphAccessToken();
   const path = `${folderPath}/${fileName}`;
-  const res = await fetch(
+  const res = await fetchRetry(
     `${GRAPH_BASE_URL}/drives/${CONCILIACION_DRIVE_ID}/root:${encodeDrivePath(path)}:/content`,
     { headers: { Authorization: `Bearer ${token}` }, cache: "no-store" }
   );
@@ -45,11 +65,15 @@ export function folderPathForYear(year: number): string {
 
 export async function driveFolderExists(folderPath: string): Promise<boolean> {
   const token = await getGraphAccessToken();
-  const res = await fetch(
+  const res = await fetchRetry(
     `${GRAPH_BASE_URL}/drives/${CONCILIACION_DRIVE_ID}/root:${encodeDrivePath(folderPath)}`,
     { headers: { Authorization: `Bearer ${token}` }, cache: "no-store" }
   );
-  return res.ok;
+  if (res.ok) return true;
+  // Solo un 404 significa "la carpeta no existe"; cualquier otra falla es
+  // transitoria y no debe confundirse con eso.
+  if (res.status === 404) return false;
+  throw new Error(`No se pudo consultar la carpeta ${folderPath} (HTTP ${res.status})`);
 }
 
 export async function uploadDriveFile(
@@ -308,11 +332,12 @@ export async function updateExcelCellsBatch(
 
 export async function getDriveItemId(fileName: string, folderPath: string = CONCILIACION_FOLDER_PATH): Promise<string | null> {
   const token = await getGraphAccessToken();
-  const res = await fetch(
+  const res = await fetchRetry(
     `${GRAPH_BASE_URL}/drives/${CONCILIACION_DRIVE_ID}/root:${encodeDrivePath(`${folderPath}/${fileName}`)}`,
     { headers: { Authorization: `Bearer ${token}` }, cache: "no-store" }
   );
-  if (!res.ok) return null;
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`No se pudo consultar "${fileName}" en SharePoint (HTTP ${res.status})`);
   return (await res.json()).id as string;
 }
 
@@ -324,7 +349,7 @@ export async function workbookCall(
   body?: unknown
 ): Promise<Response> {
   const token = await getGraphAccessToken();
-  return fetch(`${GRAPH_BASE_URL}/drives/${CONCILIACION_DRIVE_ID}/items/${itemId}/workbook${relUrl}`, {
+  return fetchRetry(`${GRAPH_BASE_URL}/drives/${CONCILIACION_DRIVE_ID}/items/${itemId}/workbook${relUrl}`, {
     method,
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),

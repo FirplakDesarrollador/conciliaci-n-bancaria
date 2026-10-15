@@ -24,17 +24,25 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  try {
-    const year = bogotaYear();
-    const folder = folderPathForYear(year);
-    if (!(await driveFolderExists(folder))) {
-      return NextResponse.json({ success: false, error: `No existe la carpeta de SharePoint del ano ${year}: ${folder}` }, { status: 409 });
+  // La corrida es idempotente (actualiza en el lugar), asi que ante una falla
+  // transitoria de SAP o SharePoint se reintenta dentro de la misma
+  // invocacion en vez de esperar al dia siguiente.
+  const year = bogotaYear();
+  const folder = folderPathForYear(year);
+  let lastError = "";
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      if (!(await driveFolderExists(folder))) {
+        return NextResponse.json({ success: false, error: `No existe la carpeta de SharePoint del ano ${year}: ${folder}` }, { status: 409 });
+      }
+      const result = await syncConsecutivoFile(year);
+      return NextResponse.json({ success: true, folder, attempt, ...result });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } catch (error: any) {
+      lastError = error.message || String(error);
+      console.error(`Error actualizando control de consecutivo (intento ${attempt}):`, error);
+      if (attempt < 3) await new Promise((r) => setTimeout(r, 30_000));
     }
-    const result = await syncConsecutivoFile(year);
-    return NextResponse.json({ success: true, folder, ...result });
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  } catch (error: any) {
-    console.error("Error actualizando control de consecutivo:", error);
-    return NextResponse.json({ success: false, error: error.message || String(error) }, { status: 500 });
   }
+  return NextResponse.json({ success: false, error: lastError }, { status: 500 });
 }

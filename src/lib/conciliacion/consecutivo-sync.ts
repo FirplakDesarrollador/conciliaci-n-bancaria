@@ -115,7 +115,10 @@ function sameValue(a: unknown, b: Cell): boolean {
 
 async function readUsedValues(itemId: string, sheet: string): Promise<Cell[][]> {
   const res = await workbookCall(itemId, "GET", `${sheetUrl(sheet)}/usedRange?$select=values`);
-  if (!res.ok) return [];
+  // Si la lectura falla NO se puede asumir una hoja vacia: todos los
+  // documentos pasarian por "nuevos" y se escribirian encima de las filas
+  // existentes (con las marcas manuales de verificacion).
+  if (!res.ok) throw new Error(`No se pudo leer la hoja ${sheet} del control (HTTP ${res.status})`);
   return ((await res.json()).values ?? []) as Cell[][];
 }
 
@@ -228,6 +231,11 @@ export async function syncConsecutivoFile(
     block.push([0, 1, 2, 3, 4].map((c) => (r[c] ?? "") as Cell));
   }
   patches.push({ relUrl: `${sheetUrl("Resumen")}/range(address='A1:E${rowsOut}')`, body: { values: block } });
+  const stamp = new Intl.DateTimeFormat("sv-SE", { timeZone: "America/Bogota", dateStyle: "short", timeStyle: "short" }).format(new Date());
+  patches.push({
+    relUrl: `${sheetUrl("Resumen")}/range(address='G1:H1')`,
+    body: { values: [["Ultima actualizacion automatica", `${stamp} (hora Bogota)`]] },
+  });
 
   const errors = await workbookPatchBatch(itemId, patches);
   if (errors.length > 0) throw new Error(`Errores al actualizar el control: ${errors.slice(0, 3).join(" | ")}`);
