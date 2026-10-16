@@ -484,8 +484,27 @@ export async function reconcileDocs(pool: SapDoc[], bankBuffers: Map<string, Buf
       stats.matchInverso += nRev;
       writes.push(...writesRev);
 
+      // Tercera pasada, ventana amplia: el banco debita varios pagos (ej. 4
+      // pagos de impuesto el dia 8) y el documento unico en SAP se registra
+      // dias despues (el 14). Solo se acepta si UN solo documento cuadra
+      // exacto con UNA sola combinacion de movimientos (misma descripcion) y
+      // sin filas en conflicto, que es lo que hace applyReverseCombo.
+      const remainingWide = remainingMoves.filter((mv) => !resolvedRows3.has(mv.row));
+      const { resolvedRows: resolvedRows3b, nAssigned: nRevWide, writes: writesRevWide } = applyReverseCombo(
+        remainingWide,
+        pool,
+        ws,
+        fname,
+        ws.name,
+        accountKey,
+        undefined,
+        10
+      );
+      stats.matchInverso += nRevWide;
+      writes.push(...writesRevWide);
+
       // Cuarta pasada: categorías conocidas sin correspondencia 1 a 1.
-      const remainingMoves2 = remainingMoves.filter((mv) => !resolvedRows3.has(mv.row));
+      const remainingMoves2 = remainingMoves.filter((mv) => !resolvedRows3.has(mv.row) && !resolvedRows3b.has(mv.row));
       const { resolvedRows: resolvedRows4, nAssigned: nGrp, writes: writesGrp } = applyGroupTotalMatch(
         remainingMoves2,
         pool,
@@ -497,7 +516,7 @@ export async function reconcileDocs(pool: SapDoc[], bankBuffers: Map<string, Buf
       stats.matchGrupo += nGrp;
       writes.push(...writesGrp);
 
-      const allResolved = new Set<number>([...resolvedRows2, ...resolvedRows3, ...resolvedRows4]);
+      const allResolved = new Set<number>([...resolvedRows2, ...resolvedRows3, ...resolvedRows3b, ...resolvedRows4]);
       for (const mv of nomatchMoves) {
         if (allResolved.has(mv.row)) continue;
         
