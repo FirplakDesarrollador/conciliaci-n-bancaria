@@ -29,7 +29,7 @@ async function fetchRetry(url: string, init: RequestInit, attempts = 4): Promise
   let lastErr: unknown;
   for (let i = 1; i <= attempts; i++) {
     try {
-      const res = await fetch(url, init);
+      const res = await fetch(url, { ...init, signal: AbortSignal.timeout(90_000) });
       if (![429, 502, 503, 504].includes(res.status) || i === attempts) return res;
     } catch (e) {
       lastErr = e;

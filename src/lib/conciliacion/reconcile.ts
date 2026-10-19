@@ -15,7 +15,7 @@ import {
 import { fixCompensacionDates, findHeaderRowAndCols, READERS, REQUIRED_HEADERS_HINT } from "./readers";
 import { loadSapDocs } from "./sap";
 import type { AccountStats, BankMove, CellWrite, SapDoc, SummaryRow } from "./types";
-import { isBankFee, norm, normAccount, sameMonth } from "./utils";
+import { isBankFee, isCashDepositText, isFiduciaDoc, isFiduciaText, norm, normAccount, sameMonth } from "./utils";
 
 export interface ReconcileInput {
   sapBuffer: Buffer;
@@ -267,6 +267,18 @@ export async function reconcileDocs(pool: SapDoc[], bankBuffers: Map<string, Buf
         if (mv.terceroFilter) {
           const tf = norm(mv.terceroFilter);
           poolForMatch = pool.filter((d) => d.tercero.includes(tf));
+        } else if (!mv.cuentaOverride) {
+          // Un traslado de la fiducia solo cruza con movimientos que el banco
+          // describe como fiducia, y una consignacion en efectivo nunca es un
+          // traslado de la fiducia (82664: se cruzaba con "CONSIG LOCAL
+          // EFECTIVO" por tener el mismo valor, en vez de "TRASLADO DE FONDO
+          // DE INVERS FIDUCUENTA" del dia anterior).
+          if (isCashDepositText(mv.refText)) {
+            poolForMatch = pool.filter((d) => !isFiduciaDoc(d));
+          } else if (isFiduciaText(mv.refText)) {
+            const soloFiducia = pool.filter(isFiduciaDoc);
+            if (soloFiducia.length > 0) poolForMatch = soloFiducia;
+          }
         }
 
         // En Banco de Bogotá los pagos con tarjeta débito/crédito son
@@ -458,65 +470,60 @@ export async function reconcileDocs(pool: SapDoc[], bankBuffers: Map<string, Buf
         });
       }
 
-      // Segunda pasada: puede que lo que quedó sin documento ahora sí
-      // cuadre en cantidad contra los documentos que sobraron en el pool.
-      const { resolvedRows: resolvedRows2, nAssigned: nPost, writes: writesPost } = applyCountMatching(
-        nomatchMoves,
-        pool,
-        ws,
-        fname,
-        ws.name,
-        accountKey
-      );
-      stats.matchConteo += nPost;
-      writes.push(...writesPost);
+      // Pasadas posteriores (conteo, un documento dividido en varios
+      // movimientos, totales por categoria). Se corren por separado para
+      // tres tipos de movimiento, porque el pool de documentos candidatos
+      // cambia: un traslado de la fiducia solo cruza con documentos de la
+      // fiducia; una consignacion en efectivo nunca cruza con ellos.
+      const laterPasses = (moves: BankMove[], poolArg: SapDoc[]): Set<number> => {
+        if (moves.length === 0) return new Set<number>();
+        // Segunda pasada: puede que lo que quedó sin documento ahora sí
+        // cuadre en cantidad contra los documentos que sobraron en el pool.
+        const { resolvedRows: resolvedRows2, nAssigned: nPost, writes: writesPost } = applyCountMatching(
+          moves, poolArg, ws, fname, ws.name, accountKey
+        );
+        stats.matchConteo += nPost;
+        writes.push(...writesPost);
 
-      // Tercera pasada: un solo documento SAP dividido en varios movimientos.
-      const remainingMoves = nomatchMoves.filter((mv) => !resolvedRows2.has(mv.row));
-      const { resolvedRows: resolvedRows3, nAssigned: nRev, writes: writesRev } = applyReverseCombo(
-        remainingMoves,
-        pool,
-        ws,
-        fname,
-        ws.name,
-        accountKey
-      );
-      stats.matchInverso += nRev;
-      writes.push(...writesRev);
+        // Tercera pasada: un solo documento SAP dividido en varios movimientos.
+        const remainingMoves = moves.filter((mv) => !resolvedRows2.has(mv.row));
+        const { resolvedRows: resolvedRows3, nAssigned: nRev, writes: writesRev } = applyReverseCombo(
+          remainingMoves, poolArg, ws, fname, ws.name, accountKey
+        );
+        stats.matchInverso += nRev;
+        writes.push(...writesRev);
 
-      // Tercera pasada, ventana amplia: el banco debita varios pagos (ej. 4
-      // pagos de impuesto el dia 8) y el documento unico en SAP se registra
-      // dias despues (el 14). Solo se acepta si UN solo documento cuadra
-      // exacto con UNA sola combinacion de movimientos (misma descripcion) y
-      // sin filas en conflicto, que es lo que hace applyReverseCombo.
-      const remainingWide = remainingMoves.filter((mv) => !resolvedRows3.has(mv.row));
-      const { resolvedRows: resolvedRows3b, nAssigned: nRevWide, writes: writesRevWide } = applyReverseCombo(
-        remainingWide,
-        pool,
-        ws,
-        fname,
-        ws.name,
-        accountKey,
-        undefined,
-        10
-      );
-      stats.matchInverso += nRevWide;
-      writes.push(...writesRevWide);
+        // Tercera pasada, ventana amplia: el banco debita varios pagos (ej. 4
+        // pagos de impuesto el dia 8) y el documento unico en SAP se registra
+        // dias despues (el 14). Solo se acepta si UN solo documento cuadra
+        // exacto con UNA sola combinacion de movimientos (misma descripcion) y
+        // sin filas en conflicto, que es lo que hace applyReverseCombo.
+        const remainingWide = remainingMoves.filter((mv) => !resolvedRows3.has(mv.row));
+        const { resolvedRows: resolvedRows3b, nAssigned: nRevWide, writes: writesRevWide } = applyReverseCombo(
+          remainingWide, poolArg, ws, fname, ws.name, accountKey, undefined, 10
+        );
+        stats.matchInverso += nRevWide;
+        writes.push(...writesRevWide);
 
-      // Cuarta pasada: categorías conocidas sin correspondencia 1 a 1.
-      const remainingMoves2 = remainingMoves.filter((mv) => !resolvedRows3.has(mv.row) && !resolvedRows3b.has(mv.row));
-      const { resolvedRows: resolvedRows4, nAssigned: nGrp, writes: writesGrp } = applyGroupTotalMatch(
-        remainingMoves2,
-        pool,
-        ws,
-        fname,
-        ws.name,
-        accountKey
-      );
-      stats.matchGrupo += nGrp;
-      writes.push(...writesGrp);
+        // Cuarta pasada: categorías conocidas sin correspondencia 1 a 1.
+        const remainingMoves2 = remainingMoves.filter((mv) => !resolvedRows3.has(mv.row) && !resolvedRows3b.has(mv.row));
+        const { resolvedRows: resolvedRows4, nAssigned: nGrp, writes: writesGrp } = applyGroupTotalMatch(
+          remainingMoves2, poolArg, ws, fname, ws.name, accountKey
+        );
+        stats.matchGrupo += nGrp;
+        writes.push(...writesGrp);
 
-      const allResolved = new Set<number>([...resolvedRows2, ...resolvedRows3, ...resolvedRows3b, ...resolvedRows4]);
+        return new Set<number>([...resolvedRows2, ...resolvedRows3, ...resolvedRows3b, ...resolvedRows4]);
+      };
+
+      const fiduciaMoves = nomatchMoves.filter((mv) => !mv.cuentaOverride && !isCashDepositText(mv.refText) && isFiduciaText(mv.refText));
+      const cashMoves = nomatchMoves.filter((mv) => !mv.cuentaOverride && isCashDepositText(mv.refText));
+      const otherMoves = nomatchMoves.filter((mv) => !fiduciaMoves.includes(mv) && !cashMoves.includes(mv));
+      const allResolved = new Set<number>([
+        ...laterPasses(fiduciaMoves, pool.filter(isFiduciaDoc)),
+        ...laterPasses(otherMoves, pool),
+        ...laterPasses(cashMoves, pool.filter((d) => !isFiduciaDoc(d))),
+      ]);
       for (const mv of nomatchMoves) {
         if (allResolved.has(mv.row)) continue;
         

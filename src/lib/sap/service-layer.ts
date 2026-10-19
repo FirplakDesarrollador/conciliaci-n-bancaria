@@ -11,7 +11,9 @@ async function fetchWithRetry(url: string, init: RequestInit, attempts = 4): Pro
   let lastError: unknown;
   for (let i = 1; i <= attempts; i++) {
     try {
-      const res = await fetch(url, init);
+      // Sin tope, una conexion colgada deja la corrida automatica esperando
+      // hasta que Vercel la corta; con tope se reintenta.
+      const res = await fetch(url, { ...init, signal: AbortSignal.timeout(90_000) });
       if (res.status !== 502 && res.status !== 503 && res.status !== 504) return res;
       lastError = new Error(`SAP respondio ${res.status}`);
       if (i === attempts) return res;

@@ -185,3 +185,18 @@ export function sequenceRatio(a: string, b: string): number {
   const matches = matchingBlocksTotal(a, b);
   return (2 * matches) / (a.length + b.length);
 }
+
+/** Documento SAP que es un traslado desde/hacia la fiducia (FIDECOMISO / FIDUCIARIA). */
+export function isFiduciaDoc(d: { tercero: string; infoDetallada: string }): boolean {
+  return /FIDECOMISO|FIDUCIARIA|FIDUCIA|FIDEICOMISO/.test(d.tercero.toUpperCase()) || d.infoDetallada.includes("12450505");
+}
+
+/** Movimiento bancario que el propio banco describe como traslado de/hacia la fiducia. */
+export function isFiduciaText(refText: string): boolean {
+  return /FIDUCUENTA|FIDUCIARIA|FIDUBOGOT|FONDO DE INVERS|FIDEICOMISO|FIDECOMISO/.test(refText);
+}
+
+/** Consignacion en efectivo: nunca es un traslado desde la fiducia. */
+export function isCashDepositText(refText: string): boolean {
+  return /^CONSIG\b.*EFECTIVO/.test(refText);
+}
