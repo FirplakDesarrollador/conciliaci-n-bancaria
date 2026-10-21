@@ -193,7 +193,7 @@ export function isFiduciaDoc(d: { tercero: string; infoDetallada: string }): boo
 
 /** Movimiento bancario que el propio banco describe como traslado de/hacia la fiducia. */
 export function isFiduciaText(refText: string): boolean {
-  return /FIDUCUENTA|FIDUCIARIA|FIDUBOGOT|FONDO DE INVERS|FIDEICOMISO|FIDECOMISO/.test(refText);
+  return /FIDUCUENTA|FIDUBOGOT|FONDO DE INVERS|FIDEICOMISO|FIDECOMISO/.test(refText);
 }
 
 /** Consignacion en efectivo: nunca es un traslado desde la fiducia. */

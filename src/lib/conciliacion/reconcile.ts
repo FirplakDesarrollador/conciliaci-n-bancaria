@@ -324,8 +324,13 @@ export async function reconcileDocs(pool: SapDoc[], bankBuffers: Map<string, Buf
           if (isCashDepositText(mv.refText)) {
             poolForMatch = pool.filter((d) => !isFiduciaDoc(d));
           } else if (isFiduciaText(mv.refText)) {
-            const soloFiducia = pool.filter(isFiduciaDoc);
-            if (soloFiducia.length > 0) poolForMatch = soloFiducia;
+            // Solo si existe un documento de la fiducia que pueda cruzar por
+            // valor y tipo; si no, el movimiento sigue con el pool completo
+            // (ej. un pago a un proveedor que menciona una fiduciaria).
+            const soloFiducia = pool.filter(
+              (d) => isFiduciaDoc(d) && d.tipo === mv.tipo && Math.abs(d.value - mv.value) <= VALUE_TOLERANCE
+            );
+            if (soloFiducia.length > 0) poolForMatch = pool.filter(isFiduciaDoc);
           }
         }
 
@@ -567,9 +572,13 @@ export async function reconcileDocs(pool: SapDoc[], bankBuffers: Map<string, Buf
       const fiduciaMoves = nomatchMoves.filter((mv) => !mv.cuentaOverride && !isCashDepositText(mv.refText) && isFiduciaText(mv.refText));
       const cashMoves = nomatchMoves.filter((mv) => !mv.cuentaOverride && isCashDepositText(mv.refText));
       const otherMoves = nomatchMoves.filter((mv) => !fiduciaMoves.includes(mv) && !cashMoves.includes(mv));
+      const resolvedFiducia = laterPasses(fiduciaMoves, pool.filter(isFiduciaDoc));
+      // Un movimiento "de fiducia" que no cruzo con la fiducia sigue con el
+      // pool completo como cualquier otro.
+      const restoMoves = [...otherMoves, ...fiduciaMoves.filter((mv) => !resolvedFiducia.has(mv.row))];
       const allResolved = new Set<number>([
-        ...laterPasses(fiduciaMoves, pool.filter(isFiduciaDoc)),
-        ...laterPasses(otherMoves, pool),
+        ...resolvedFiducia,
+        ...laterPasses(restoMoves, pool),
         ...laterPasses(cashMoves, pool.filter((d) => !isFiduciaDoc(d))),
       ]);
       for (const mv of nomatchMoves) {

@@ -364,6 +364,21 @@ export function applyReverseCombo(
     const groupSizes = sizes ?? rangeInclusive(2, Math.min(mvs.length, effectiveMax));
     const found: Array<[SapDoc, BankMove[]]> = [];
 
+    // Grupos grandes (mas de effectiveMax movimientos): no se prueban todas las
+    // combinaciones, pero si el TOTAL de todo el grupo cuadra exacto con un
+    // documento, es el documento dividido en todos esos movimientos (ej. un
+    // pago PSE a la Gobernacion que el banco debita en 12 partidas).
+    if (mvs.length > effectiveMax) {
+      const times = mvs.map((m) => m.date.getTime());
+      if (Math.round((Math.max(...times) - Math.min(...times)) / 86_400_000) <= window) {
+        const totalAll = mvs.reduce((sum, m) => sum + m.value, 0);
+        const whole = docsCand.filter(
+          (d) => Math.abs(d.value - totalAll) <= MULTI_VALUE_TOLERANCE && Math.abs(daysBetween(d.date, mvs[0].date)) <= window
+        );
+        if (whole.length === 1) found.push([whole[0], mvs]);
+      }
+    }
+
     for (const size of groupSizes) {
       if (mvs.length < size) continue;
       for (const combo of combinations(mvs, size)) {
