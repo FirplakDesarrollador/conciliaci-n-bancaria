@@ -9,6 +9,7 @@ import {
   bestByTercero,
   findCandidates,
   pairBatch,
+  sharedNameTokens,
   tryMultiMatch,
   tryMultiMatchNoCode,
 } from "./matching";
@@ -172,17 +173,21 @@ export async function reconcileDocs(pool: SapDoc[], bankBuffers: Map<string, Buf
           const allowed = new Set([mv.cuentaOverride ?? normAccount(accountKey)].flat());
           const leg = canc.find((c) => allowed.has(c.cuenta));
           if (!leg) continue;
-          const repl = pool
-            .filter(
-              (d) =>
-                !d.used &&
-                d.tipo === leg.tipo &&
-                allowed.has(d.cuenta) &&
-                d.tercero === leg.tercero &&
-                Math.abs(d.value - leg.value) <= VALUE_TOLERANCE &&
-                Number(d.docNum) > Number(leg.docNum)
-            )
-            .sort((a, b) => Number(a.docNum) - Number(b.docNum))[0];
+          // Mismo tipo/cuenta/valor y numero mayor. Se prefiere el MISMO tercero;
+          // si el recibo nuevo se hizo a otro tercero (82729 HAYDEE MORA MORA ->
+          // 82780 DISTR E INVERSIONES MORA MORA), se acepta solo si el valor
+          // coincide al centavo, comparten una palabra del nombre y es el unico.
+          const base = pool.filter(
+            (d) =>
+              !d.used &&
+              d.tipo === leg.tipo &&
+              allowed.has(d.cuenta) &&
+              Math.abs(d.value - leg.value) <= VALUE_TOLERANCE &&
+              Number(d.docNum) > Number(leg.docNum)
+          );
+          const sameTercero = base.filter((d) => d.tercero === leg.tercero).sort((a, b) => Number(a.docNum) - Number(b.docNum));
+          const similar = base.filter((d) => Math.abs(d.value - leg.value) < 0.01 && sharedNameTokens(d.tercero, leg.tercero) >= 1);
+          const repl = sameTercero[0] ?? (similar.length === 1 ? similar[0] : undefined);
           if (!repl) continue;
           repl.used = true;
           repl.usedBy = `${fname}!${ws.name}!R${mv.row}`;
