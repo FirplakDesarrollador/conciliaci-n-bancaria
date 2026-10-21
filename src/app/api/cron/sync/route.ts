@@ -21,8 +21,8 @@ export async function GET(request: Request) {
   let last: unknown = { success: false, error: "sin ejecutar" };
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      const { sapPayments, vendorPayments } = await fetchSapPayments();
-      const result = await runFullSync(sapPayments, vendorPayments);
+      const { sapPayments, vendorPayments, cancelledIncoming, cancelledVendor } = await fetchSapPayments();
+      const result = await runFullSync(sapPayments, vendorPayments, { incoming: cancelledIncoming, vendor: cancelledVendor });
       if (result.success) return NextResponse.json({ ...result, attempt });
       last = result;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

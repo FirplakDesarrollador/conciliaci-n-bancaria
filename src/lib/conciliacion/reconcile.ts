@@ -60,7 +60,7 @@ export async function reconcile({ sapBuffer, bankBuffers }: ReconcileInput): Pro
   return reconcileDocs(pool, bankBuffers);
 }
 
-export async function reconcileDocs(pool: SapDoc[], bankBuffers: Map<string, Buffer>): Promise<ReconcileOutput> {
+export async function reconcileDocs(pool: SapDoc[], bankBuffers: Map<string, Buffer>, cancelledPool: SapDoc[] = []): Promise<ReconcileOutput> {
   if (pool.length === 0) {
     throw new Error("No hay documentos SAP para conciliar (revisa fechas/valores).");
   }
@@ -147,6 +147,49 @@ export async function reconcileDocs(pool: SapDoc[], bankBuffers: Map<string, Buf
               d.usedBy = `${fname}!${ws.name}!R${mv.row}`;
             }
           }
+        }
+      }
+    }
+
+    // Recibos/pagos CANCELADOS que quedaron escritos en el banco: si SAP tiene
+    // un documento nuevo del mismo tercero, valor y cuenta (el que lo
+    // sustituyo, con numero mayor) que no esta usado en ninguna fila, se
+    // reemplaza el numero cancelado por el nuevo. Es la unica situacion en la
+    // que se cambia un documento ya descargado (81399->81993, 82519->82629).
+    if (cancelledPool.length > 0) {
+      const cancelledByNum = new Map<string, SapDoc[]>();
+      for (const c of cancelledPool) {
+        if (!cancelledByNum.has(c.docNum)) cancelledByNum.set(c.docNum, []);
+        cancelledByNum.get(c.docNum)!.push(c);
+      }
+      for (const { ws, moves } of sheetsData) {
+        for (const mv of moves) {
+          if (isEmptyDoc(mv.docValue)) continue;
+          const nums = extractDocNums(mv.docValue);
+          if (nums.length !== 1) continue;
+          const canc = cancelledByNum.get(nums[0]);
+          if (!canc) continue;
+          const allowed = new Set([mv.cuentaOverride ?? normAccount(accountKey)].flat());
+          const leg = canc.find((c) => allowed.has(c.cuenta));
+          if (!leg) continue;
+          const repl = pool
+            .filter(
+              (d) =>
+                !d.used &&
+                d.tipo === leg.tipo &&
+                allowed.has(d.cuenta) &&
+                d.tercero === leg.tercero &&
+                Math.abs(d.value - leg.value) <= VALUE_TOLERANCE &&
+                Number(d.docNum) > Number(leg.docNum)
+            )
+            .sort((a, b) => Number(a.docNum) - Number(b.docNum))[0];
+          if (!repl) continue;
+          repl.used = true;
+          repl.usedBy = `${fname}!${ws.name}!R${mv.row}`;
+          const cell = ws.getRow(mv.row).getCell(mv.docCol);
+          cell.value = repl.docNum;
+          writes.push({ sheet: ws.name, row: mv.row, col: mv.docCol, value: repl.docNum });
+          setFill(cell, FILL_MATCHED);
         }
       }
     }

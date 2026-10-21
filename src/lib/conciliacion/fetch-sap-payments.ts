@@ -29,6 +29,12 @@ export async function fetchSapPayments() {
   let sapPayments: any[] = [];
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let vendorPayments: any[] = [];
+  // Cancelados de la misma ventana: sirven para reemplazar, en los archivos de
+  // banco, un recibo cancelado por el nuevo recibo que lo sustituyo.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let cancelledIncoming: any[] = [];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let cancelledVendor: any[] = [];
 
   let nextLink: string | null = `/IncomingPayments?$filter=${filterStr}&$orderby=DocNum`;
   while (nextLink) {
@@ -39,6 +45,7 @@ export async function fetchSapPayments() {
     }
     const data = await res.json();
     sapPayments = sapPayments.concat((data.value || []).filter(isValidPayment));
+    cancelledIncoming = cancelledIncoming.concat((data.value || []).filter((p: { Cancelled?: string }) => !isValidPayment(p) && p.Cancelled === "tYES"));
     nextLink = nextLinkOf(data);
   }
 
@@ -51,8 +58,9 @@ export async function fetchSapPayments() {
     }
     const data = await res.json();
     vendorPayments = vendorPayments.concat((data.value || []).filter(isValidPayment));
+    cancelledVendor = cancelledVendor.concat((data.value || []).filter((p: { Cancelled?: string }) => !isValidPayment(p) && p.Cancelled === "tYES"));
     vendorNextLink = nextLinkOf(data);
   }
 
-  return { sapPayments, vendorPayments };
+  return { sapPayments, vendorPayments, cancelledIncoming, cancelledVendor };
 }

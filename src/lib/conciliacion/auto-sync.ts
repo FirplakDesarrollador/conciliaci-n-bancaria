@@ -26,7 +26,7 @@ function colToLetter(columnNumber: number): string {
  * de auto-sync) es responsable de esa verificacion antes de invocarla.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export async function runFullSync(sapPayments: any[], vendorPayments: any[]) {
+export async function runFullSync(sapPayments: any[], vendorPayments: any[], cancelled: { incoming: any[]; vendor: any[] } = { incoming: [], vendor: [] }) {
   try {
     // 1. Convertir a SapDoc[]
     const pool = convertApiToSapDocs(sapPayments, vendorPayments);
@@ -98,7 +98,11 @@ export async function runFullSync(sapPayments: any[], vendorPayments: any[]) {
     }
 
     // 4. Ejecutar motor de conciliacion
-    const { results } = await reconcileDocs(pool, bankBuffers);
+    // Los cancelados se convierten sin la marca "CANCELADO" de los comentarios
+    // (convertApiToSapDocs la descarta) para poder ubicar su tercero/valor/cuenta.
+    const clean = (p: { JournalRemarks?: unknown; Remarks?: unknown }) => ({ ...p, JournalRemarks: "", Remarks: "" });
+    const cancelledPool = convertApiToSapDocs(cancelled.incoming.map(clean), cancelled.vendor.map(clean));
+    const { results } = await reconcileDocs(pool, bankBuffers, cancelledPool);
 
     // 5. Aplicar SOLO las celdas que cambiaron, con PATCH quirurgico
     // (updateExcelCellsBatch), en vez de subir el workbook completo. Subir
