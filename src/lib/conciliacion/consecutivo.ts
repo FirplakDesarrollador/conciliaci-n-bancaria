@@ -267,6 +267,8 @@ export interface ControlRow {
   fecha?: string;
   banco?: string;
   tercero?: string;
+  /** Codigo del socio de negocios en SAP (CardCode). */
+  codigo?: string;
   valor?: number;
   conciliacion?: string;
   ubicacion?: string;
@@ -372,6 +374,7 @@ function buildSeriesRows(docs: RawDoc[], extraNames: Map<string, string>, index:
         fecha: d.DocDate.slice(0, 10),
         banco,
         tercero: d.CardName || "",
+        codigo: d.CardCode || "",
         valor: esMiami && usd !== null ? usd : totalCop,
         conciliacion: v.conciliacion,
         ubicacion: v.ubicacion,
@@ -387,8 +390,9 @@ function monthNameEs(monthIndex0: number): string {
   return names[monthIndex0];
 }
 
-export const COLUMNS = ["# Documento", "Estado", "Fecha", "Banco SAP", "Tercero", "Valor", "Conciliacion", "Ubicacion en bancos", "Observacion"];
-export const WIDTHS = [14, 12, 12, 42, 40, 16, 30, 50, 60];
+export const CODIGO_HEADER = "Codigo socio de negocios";
+export const COLUMNS = ["# Documento", "Estado", "Fecha", "Banco SAP", "Tercero", CODIGO_HEADER, "Valor", "Conciliacion", "Ubicacion en bancos", "Observacion"];
+export const WIDTHS = [14, 12, 12, 42, 40, 24, 16, 30, 50, 60];
 
 /**
  * Datos del control: una hoja por mes y por serie (recibidos serie 151,

@@ -9,6 +9,7 @@ import {
 } from "@/lib/graph/sharepoint";
 import {
   buildConsecutivoSheets,
+  CODIGO_HEADER,
   COLUMNS,
   controlFileName,
   PROBLEMAS,
@@ -21,7 +22,7 @@ type SheetData = { name: string; rows: ControlRow[] };
 
 function rowValues(r: ControlRow): Cell[] {
   return [
-    r.docNum, r.estado, r.fecha ?? "", r.banco ?? "", r.tercero ?? "", r.valor ?? "",
+    r.docNum, r.estado, r.fecha ?? "", r.banco ?? "", r.tercero ?? "", r.codigo ?? "", r.valor ?? "",
     r.conciliacion ?? "", r.ubicacion ?? "", r.observacion ?? "",
   ];
 }
@@ -49,7 +50,7 @@ function buildSummaries(sheets: SheetData[]) {
       }
       if (isProblem(r)) {
         const v = rowValues(r);
-        v[6] = r.estado === "FALTANTE" ? "NUMERO FALTANTE" : r.conciliacion ?? "";
+        v[7] = r.estado === "FALTANTE" ? "NUMERO FALTANTE" : r.conciliacion ?? "";
         inconsistencias.push({ key: `${sh.name}|${r.docNum}`, values: [sh.name, ...v] });
       }
     }
@@ -123,6 +124,25 @@ async function readUsedValues(itemId: string, sheet: string): Promise<Cell[][]> 
 }
 
 /**
+ * Archivos ya existentes (creados antes de que el control llevara el codigo del
+ * socio de negocios): inserta la columna en su lugar, desplazando a la derecha
+ * lo que ya hay, para no perder filas, colores ni marcas manuales.
+ */
+async function ensureCodigoColumn(itemId: string, sheet: string, colIdx0: number): Promise<void> {
+  const res = await workbookCall(itemId, "GET", `${sheetUrl(sheet)}/range(address='A1:L1')?$select=values`);
+  if (!res.ok) throw new Error(`No se pudo leer el encabezado de ${sheet} (HTTP ${res.status})`);
+  const header = ((await res.json()).values?.[0] ?? []) as Cell[];
+  if (String(header[colIdx0] ?? "") === CODIGO_HEADER) return;
+  if (header.some((h) => String(h) === CODIGO_HEADER)) return; // ya existe en otra posicion
+  const col = colLetter(colIdx0 + 1);
+  const ins = await workbookCall(itemId, "POST", `${sheetUrl(sheet)}/range(address='${col}:${col}')/insert`, { shift: "Right" });
+  if (!ins.ok) throw new Error(`No se pudo insertar la columna en ${sheet} (HTTP ${ins.status}): ${await ins.text()}`);
+  await workbookCall(itemId, "PATCH", `${sheetUrl(sheet)}/range(address='${col}1')`, { values: [[CODIGO_HEADER]] });
+  await workbookCall(itemId, "PATCH", `${sheetUrl(sheet)}/range(address='${col}:${col}')/format`, { columnWidth: 24 * 6 });
+  await new Promise((r) => setTimeout(r, 15000)); // lectura posterior a la escritura
+}
+
+/**
  * Actualiza el archivo de control YA EXISTENTE sin reemplazarlo. A las filas
  * que ya estan solo se les actualizan los valores de las columnas B..I (estado
  * de descarga, banco, etc.); los documentos nuevos se agregan al final de su
@@ -166,6 +186,7 @@ export async function syncConsecutivoFile(
   // Hojas de detalle
   for (const sh of sheets) {
     if (!existing.has(sh.name)) await createSheet(sh.name, COLUMNS, WIDTHS);
+    else await ensureCodigoColumn(itemId, sh.name, 5);
     const values = await readUsedValues(itemId, sh.name);
     const rowOf = new Map<number, number>(); // # documento -> fila (1-based)
     values.forEach((row, i) => { if (i > 0 && typeof row[0] === "number") rowOf.set(row[0], i + 1); });
@@ -179,12 +200,12 @@ export async function syncConsecutivoFile(
       // la fecha guardada como numero (fecha de calendario) se reescribe como texto
       const mismaFecha = typeof cur[2] !== "number";
       if (mismaFecha && v.slice(1).every((x, i) => sameValue(cur[i + 1], x))) continue;
-      patches.push({ relUrl: `${sheetUrl(sh.name)}/range(address='B${at}:I${at}')`, body: { values: [asText(v, 2).slice(1)] } });
+      patches.push({ relUrl: `${sheetUrl(sh.name)}/range(address='B${at}:J${at}')`, body: { values: [asText(v, 2).slice(1)] } });
       actualizadas++;
     }
     for (let i = 0; i < append.length; i += 100) {
       const chunk = append.slice(i, i + 100).map((v) => asText(v, 2));
-      patches.push({ relUrl: `${sheetUrl(sh.name)}/range(address='A${next}:I${next + chunk.length - 1}')`, body: { values: chunk } });
+      patches.push({ relUrl: `${sheetUrl(sh.name)}/range(address='A${next}:J${next + chunk.length - 1}')`, body: { values: chunk } });
       next += chunk.length;
     }
     nuevas += append.length;
@@ -193,6 +214,7 @@ export async function syncConsecutivoFile(
   // Inconsistencias: se actualizan las existentes (hoja + documento) con su
   // estado actual y se agregan las nuevas; no se borra ninguna fila.
   if (!existing.has("Inconsistencias")) await createSheet("Inconsistencias", ["Hoja", ...COLUMNS], [30, ...WIDTHS]);
+  else await ensureCodigoColumn(itemId, "Inconsistencias", 6);
   const incValues = await readUsedValues(itemId, "Inconsistencias");
   const incRow = new Map<string, number>();
   incValues.forEach((row, i) => { if (i > 0) incRow.set(`${row[0]}|${row[1]}`, i + 1); });
@@ -202,10 +224,10 @@ export async function syncConsecutivoFile(
     const r = detalle.get(key);
     if (!r) continue;
     const v = rowValues(r);
-    if (r.estado === "FALTANTE") v[6] = "NUMERO FALTANTE";
+    if (r.estado === "FALTANTE") v[7] = "NUMERO FALTANTE";
     const cur = incValues[at - 1] ?? [];
     if (typeof cur[3] !== "number" && v.slice(1).every((x, i) => sameValue(cur[i + 2], x))) continue;
-    patches.push({ relUrl: `${sheetUrl("Inconsistencias")}/range(address='C${at}:J${at}')`, body: { values: [asText(v, 2).slice(1)] } });
+    patches.push({ relUrl: `${sheetUrl("Inconsistencias")}/range(address='C${at}:K${at}')`, body: { values: [asText(v, 2).slice(1)] } });
   }
   let nextInc = Math.max(incValues.length, 1) + 1;
   const incNew = inconsistencias.filter((i) => !incRow.has(i.key));
@@ -213,10 +235,10 @@ export async function syncConsecutivoFile(
     const first = nextInc;
     for (let i = 0; i < incNew.length; i += 100) {
       const chunk = incNew.slice(i, i + 100).map((x) => asText(x.values, 3));
-      patches.push({ relUrl: `${sheetUrl("Inconsistencias")}/range(address='A${nextInc}:J${nextInc + chunk.length - 1}')`, body: { values: chunk } });
+      patches.push({ relUrl: `${sheetUrl("Inconsistencias")}/range(address='A${nextInc}:K${nextInc + chunk.length - 1}')`, body: { values: chunk } });
       nextInc += chunk.length;
     }
-    patches.push({ relUrl: `${sheetUrl("Inconsistencias")}/range(address='A${first}:J${nextInc - 1}')/format/fill`, body: { color: "#FFC7CE" } });
+    patches.push({ relUrl: `${sheetUrl("Inconsistencias")}/range(address='A${first}:K${nextInc - 1}')/format/fill`, body: { color: "#FFC7CE" } });
   }
 
   // Resumen: tabla calculada, se reescribe completa (solo valores).
