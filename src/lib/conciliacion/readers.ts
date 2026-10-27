@@ -184,6 +184,9 @@ function readDavivienda(ws: ExcelJS.Worksheet, headers: Map<string, number>, hea
     let tipo: "IN" | "OUT" | null = null;
     if (transac.includes("CRÉDITO")) tipo = "IN";
     else if (transac.includes("DÉBITO")) tipo = "OUT";
+    // "Deposito Normal" (consignacion en efectivo en oficina) es un abono: antes
+    // la fila se descartaba y el recibo 82880 nunca encontraba su movimiento.
+    else if (/DEP[ÓO]SITO|CONSIGNACI[ÓO]N/.test(transac) || /^CONSIGNACI[ÓO]N/.test(refText)) tipo = "IN";
     else continue;
 
     moves.push({ sheet: ws.name, row: r, date: fecha, value: Math.abs(valor), tipo, docCol, docValue, refText });
