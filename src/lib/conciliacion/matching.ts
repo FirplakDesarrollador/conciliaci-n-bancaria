@@ -236,6 +236,31 @@ export function pairBatch(moves: BankMove[], docs: SapDoc[]): Map<number, SapDoc
   return out;
 }
 
+const GENERIC_WORDS = new Set([
+  "COLOMBIA", "GRUPO", "SERVICIOS", "COMERCIAL", "CONSTRUCTORA", "INVERSIONES", "DISTRIBUIDORA", "PROVEEDORES",
+  "TRASLADO", "TRANSFERENCIA", "FONDOS", "SUCURSAL", "VIRTUAL", "PRODUCTO", "CONCEPTO", "REFERENCIA", "HECHO",
+  "EFECTIVO", "INTERBANC", "TRANSFER", "PAGO", "CONSIGNACION", "ABONO", "BANCO", "SOCIEDAD", "LIMITADA",
+]);
+
+/**
+ * Entre documentos candidatos del MISMO valor, devuelve el que el propio
+ * movimiento bancario identifica: primero por NIT (unico), luego por nombre
+ * (el unico que comparte mas palabras distintivas con el detalle del banco).
+ * Si el movimiento no trae identidad, devuelve null y se sigue por fecha.
+ */
+export function identityDocFor(candidates: SapDoc[], refText: string): SapDoc | null {
+  if (candidates.length < 2) return null;
+  const byNit = bestByNit(candidates, refText);
+  if (byNit) return byNit;
+  const tok = (t: string) => new Set(norm(t).split(/[^A-Z0-9]+/).filter((w) => w.length >= 4 && !GENERIC_WORDS.has(w)));
+  const ref = tok(refText);
+  const scored = candidates
+    .map((d) => ({ d, n: [...tok(d.tercero)].filter((w) => ref.has(w)).length }))
+    .sort((a, b) => b.n - a.n);
+  if (scored[0].n >= 1 && scored[0].n > scored[1].n) return scored[0].d;
+  return null;
+}
+
 /**
  * Agrupa movimientos por (tipo, cuenta, valor, filtro de tercero). Si la
  * cantidad de movimientos coincide (o casi) con la cantidad de documentos

@@ -7,6 +7,7 @@ import {
   applyReverseCombo,
   bestByNit,
   bestByTercero,
+  identityDocFor,
   findCandidates,
   pairBatch,
   sharedNameTokens,
@@ -211,28 +212,41 @@ export async function reconcileDocs(pool: SapDoc[], bankBuffers: Map<string, Buf
       // mas cerca en fecha (no por orden de fila). Si dos movimientos tienen
       // el mismo valor y solo hay un documento, se lo queda el de mejor
       // coincidencia en vez del primero que aparezca en la hoja.
-      const nearestCandidateDays = (mv: BankMove): number => {
+      const valueCandidates = (mv: BankMove): SapDoc[] => {
         const allowed = new Set([mv.cuentaOverride ?? normAccount(accountKey)].flat());
         const tf = mv.terceroFilter ? norm(mv.terceroFilter) : null;
         const k = Math.round(mv.value);
-        let best = Infinity;
+        const out: SapDoc[] = [];
         for (let dk = -1; dk <= 1; dk++) {
           for (const d of poolByValue.get(k + dk) ?? []) {
             if (d.used || d.tipo !== mv.tipo || !allowed.has(d.cuenta)) continue;
             if (Math.abs(d.value - mv.value) > VALUE_TOLERANCE) continue;
             if (!sameMonth(d.date, mv.date)) continue;
             if (tf && !d.tercero.includes(tf)) continue;
-            best = Math.min(best, Math.abs(d.date.getTime() - mv.date.getTime()) / 86_400_000);
+            out.push(d);
           }
         }
+        return out;
+      };
+      const nearestCandidateDays = (mv: BankMove): number => {
+        let best = Infinity;
+        for (const d of valueCandidates(mv)) best = Math.min(best, Math.abs(d.date.getTime() - mv.date.getTime()) / 86_400_000);
         return best;
       };
+      // Un movimiento que trae NIT o nombre que identifica a UNO de varios
+      // documentos del mismo valor (tres pagos de $6.000.000) reclama su
+      // documento ANTES que los movimientos sin identidad, que despues toman
+      // los que sobran; si no, un movimiento anonimo mas cercano en fecha se
+      // llevaba el documento del que si traia el nombre.
+      const identityDocOf = (mv: BankMove): SapDoc | null => identityDocFor(valueCandidates(mv), mv.refText);
       const orderedMoves = moves
         .map((mv) => ({
           mv,
           dist:
             !resolvedRows.has(mv.row) && isEmptyDoc(mv.docValue) && !isBankFee(mv.refText)
-              ? nearestCandidateDays(mv)
+              ? identityDocOf(mv)
+                ? -1
+                : nearestCandidateDays(mv)
               : Infinity,
         }))
         .sort((a, b) => (a.dist === b.dist ? 0 : a.dist < b.dist ? -1 : 1))
@@ -343,8 +357,17 @@ export async function reconcileDocs(pool: SapDoc[], bankBuffers: Map<string, Buf
 
         // Una suma de recibos EXACTAMENTE del mismo día es más confiable que
         // un documento individual de otro día, así que se intenta primero.
-        const sameDayCombo = tryMultiMatch(poolForMatch, mv.tipo, cuentaForMatch, mv.value, mv.date, 0);
-        const [candidates, how] = findCandidates(poolForMatch, mv.tipo, cuentaForMatch, mv.value, mv.date, toleranceDays);
+        let sameDayCombo = tryMultiMatch(poolForMatch, mv.tipo, cuentaForMatch, mv.value, mv.date, 0);
+        let [candidates, how] = findCandidates(poolForMatch, mv.tipo, cuentaForMatch, mv.value, mv.date, toleranceDays);
+        // Si el propio movimiento identifica (NIT/nombre) a uno de varios
+        // documentos del mismo valor, ese es el documento, aunque otro este
+        // mas cerca en fecha.
+        const idDoc = identityDocFor(valueCandidates(mv).filter((d) => poolForMatch.includes(d)), mv.refText);
+        if (idDoc && !(candidates.length === 1 && candidates[0] === idDoc)) {
+          candidates = [idDoc];
+          how = Math.abs(idDoc.date.getTime() - mv.date.getTime()) < 86_400_000 ? "exacta" : "tolerancia";
+          sameDayCombo = null;
+        }
         const cell = ws.getRow(mv.row).getCell(mv.docCol);
 
         if (sameDayCombo && !(candidates.length === 1 && how === "exacta")) {
