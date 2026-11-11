@@ -485,31 +485,42 @@ export async function reconcileDocs(pool: SapDoc[], bankBuffers: Map<string, Buf
       // Lotes: N movimientos ambiguos del mismo valor y dia contra exactamente
       // N documentos empatados (varios pagos identicos el mismo dia a distintos
       // beneficiarios). Se reparten entre si (ver pairBatch).
-      const batches = new Map<string, typeof deferredAmbiguous>();
-      for (const d of deferredAmbiguous) {
-        const k = `${d.mv.tipo}|${Math.round(d.mv.value * 100)}|${d.mv.date.getTime()}`;
-        if (!batches.has(k)) batches.set(k, []);
-        batches.get(k)!.push(d);
-      }
       const batchDone = new Set<number>();
-      for (const group of batches.values()) {
-        if (group.length < 2) continue;
-        const first = group[0];
-        const [tied] = findCandidates(first.poolForMatch, first.mv.tipo, first.cuentaForMatch, first.mv.value, first.mv.date, first.toleranceDays);
-        if (tied.length !== group.length) continue;
-        const assignment = pairBatch(group.map((g) => g.mv), tied);
-        for (const g of group) {
-          const doc = assignment.get(g.mv.row);
-          if (!doc) continue;
-          doc.used = true;
-          doc.usedBy = `${fname}!${ws.name}!R${g.mv.row}`;
-          ws.getRow(g.mv.row).getCell(g.mv.docCol).value = doc.docNum;
-          writes.push({ sheet: ws.name, row: g.mv.row, col: g.mv.docCol, value: doc.docNum });
-          setFill(ws.getRow(g.mv.row).getCell(g.mv.docCol), FILL_MATCHED);
-          stats.matchConteo++;
-          batchDone.add(g.mv.row);
+      // Primero por valor Y dia; luego solo por valor, pero unicamente cuando
+      // los documentos empatados son del MISMO tercero (interconmutables: dos
+      // traslados de $20.000.000 de la fiducia contra dos recibos identicos).
+      const runBatches = (keyOf: (d: (typeof deferredAmbiguous)[number]) => string, soloMismoTercero: boolean) => {
+        const batches = new Map<string, typeof deferredAmbiguous>();
+        for (const d of deferredAmbiguous) {
+          if (batchDone.has(d.mv.row)) continue;
+          const k = keyOf(d);
+          if (!batches.has(k)) batches.set(k, []);
+          batches.get(k)!.push(d);
         }
-      }
+        for (const group of batches.values()) {
+          if (group.length < 2) continue;
+          group.sort((x, y) => x.mv.date.getTime() - y.mv.date.getTime() || x.mv.row - y.mv.row);
+          const first = group[0];
+          const [tied] = findCandidates(first.poolForMatch, first.mv.tipo, first.cuentaForMatch, first.mv.value, first.mv.date, first.toleranceDays);
+          if (tied.length !== group.length) continue;
+          if (soloMismoTercero && new Set(tied.map((t) => t.tercero)).size !== 1) continue;
+          tied.sort((x, y) => Number(x.docNum) - Number(y.docNum));
+          const assignment = pairBatch(group.map((g) => g.mv), tied);
+          for (const g of group) {
+            const doc = assignment.get(g.mv.row);
+            if (!doc) continue;
+            doc.used = true;
+            doc.usedBy = `${fname}!${ws.name}!R${g.mv.row}`;
+            ws.getRow(g.mv.row).getCell(g.mv.docCol).value = doc.docNum;
+            writes.push({ sheet: ws.name, row: g.mv.row, col: g.mv.docCol, value: doc.docNum });
+            setFill(ws.getRow(g.mv.row).getCell(g.mv.docCol), FILL_MATCHED);
+            stats.matchConteo++;
+            batchDone.add(g.mv.row);
+          }
+        }
+      };
+      runBatches((d) => `${d.mv.tipo}|${Math.round(d.mv.value * 100)}|${d.mv.date.getTime()}`, false);
+      runBatches((d) => `${d.mv.tipo}|${Math.round(d.mv.value * 100)}`, true);
 
       for (const { mv, toleranceDays, cuentaForMatch, poolForMatch } of deferredAmbiguous) {
         if (batchDone.has(mv.row)) continue;
