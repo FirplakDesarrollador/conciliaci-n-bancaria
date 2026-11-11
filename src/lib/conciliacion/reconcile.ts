@@ -184,7 +184,8 @@ export async function reconcileDocs(pool: SapDoc[], bankBuffers: Map<string, Buf
               d.tipo === leg.tipo &&
               allowed.has(d.cuenta) &&
               Math.abs(d.value - leg.value) <= VALUE_TOLERANCE &&
-              Number(d.docNum) > Number(leg.docNum)
+              Number(d.docNum) > Number(leg.docNum) &&
+              sameMonth(d.date, mv.date)
           );
           const sameTercero = base.filter((d) => d.tercero === leg.tercero).sort((a, b) => Number(a.docNum) - Number(b.docNum));
           const similar = base.filter((d) => Math.abs(d.value - leg.value) < 0.01 && sharedNameTokens(d.tercero, leg.tercero) >= 1);

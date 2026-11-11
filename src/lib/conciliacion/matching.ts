@@ -315,6 +315,9 @@ export function applyCountMatching(
       let bestDist: number | null = null;
       for (const mv of remainingMvs) {
         for (const d of remainingDocs) {
+          // Coincidencia de mes: un documento nunca se asigna a un movimiento
+          // de otro mes.
+          if (!sameMonth(d.date, mv.date)) continue;
           const dist = Math.abs(daysBetween(d.date, mv.date));
           if (bestDist === null || dist < bestDist) {
             bestDist = dist;
@@ -322,9 +325,10 @@ export function applyCountMatching(
           }
         }
       }
-      pairs.push(best!);
-      remainingMvs.splice(remainingMvs.indexOf(best![0]), 1);
-      remainingDocs.splice(remainingDocs.indexOf(best![1]), 1);
+      if (!best) break;
+      pairs.push(best);
+      remainingMvs.splice(remainingMvs.indexOf(best[0]), 1);
+      remainingDocs.splice(remainingDocs.indexOf(best[1]), 1);
     }
 
     for (const [mv, doc] of pairs) {
@@ -398,7 +402,10 @@ export function applyReverseCombo(
       if (Math.round((Math.max(...times) - Math.min(...times)) / 86_400_000) <= window) {
         const totalAll = mvs.reduce((sum, m) => sum + m.value, 0);
         const whole = docsCand.filter(
-          (d) => Math.abs(d.value - totalAll) <= MULTI_VALUE_TOLERANCE && Math.abs(daysBetween(d.date, mvs[0].date)) <= window
+          (d) =>
+            Math.abs(d.value - totalAll) <= MULTI_VALUE_TOLERANCE &&
+            Math.abs(daysBetween(d.date, mvs[0].date)) <= window &&
+            sameMonth(d.date, mvs[0].date)
         );
         if (whole.length === 1) found.push([whole[0], mvs]);
       }
@@ -414,6 +421,7 @@ export function applyReverseCombo(
         const total = combo.reduce((s, m) => s + m.value, 0);
         for (const d of docsCand) {
           if (Math.abs(daysBetween(d.date, combo[0].date)) > window) continue;
+          if (!sameMonth(d.date, combo[0].date)) continue;
           if (Math.abs(d.value - total) <= MULTI_VALUE_TOLERANCE) {
             found.push([d, combo]);
           }
