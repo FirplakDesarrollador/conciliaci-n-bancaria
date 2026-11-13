@@ -4,6 +4,7 @@ import { sapClient } from "@/lib/sap/service-layer";
 import { downloadDriveFile, folderPathForYear } from "@/lib/graph/sharepoint";
 import { ACCOUNT_MAP, MANUAL_CUENTA_OVERRIDES, MIAMI_ACCOUNT, TRANSFER_ACCOUNT_NAMES } from "./config";
 import { findHeaderRowAndCols, READERS, REQUIRED_HEADERS_HINT } from "./readers";
+import { FIDUCIA_TERCEROS, fiduciaCodeForBankText } from "./utils";
 
 // En 2026 el control arranca en octubre (decision del usuario, 2026-10-01:
 // setiembre ya quedo cerrado sin este control). Desde 2027 se genera un
@@ -17,7 +18,7 @@ export function controlFileName(year: number): string {
   return `CONTROL_CONSECUTIVO_PAGOS_${year}.xlsx`;
 }
 
-const FIELDS = "DocNum,DocEntry,Series,DocDate,Cancelled,CardCode,CardName,TransferAccount,CashAccount,TransferSum,CashSum,DocCurrency,DocRate,Remarks,JournalRemarks";
+const FIELDS = "DocNum,DocEntry,Series,DocDate,Cancelled,CardCode,CardName,TransferAccount,CashAccount,TransferSum,CashSum,DocCurrency,DocRate,Remarks,JournalRemarks,U_CodTecero,U_DescripTercero,U_HBT_Tercero,PaymentAccounts";
 const FIDUCIA_ACCOUNT = "12450505";
 
 interface RawDoc {
@@ -33,6 +34,11 @@ interface RawDoc {
   CashAccount?: string | null;
   TransferSum?: number;
   CashSum?: number;
+  /** Tercero de la fiducia (traslados entre cuentas propias y fiducias). */
+  U_CodTecero?: string | null;
+  U_DescripTercero?: string | null;
+  U_HBT_Tercero?: string | null;
+  PaymentAccounts?: { AccountCode?: string; U_HBT_Tercero?: string | null }[];
 }
 
 async function fetchAllBetween(
@@ -101,6 +107,8 @@ interface Loc {
   row: number;
   /** la celda del banco lista varios documentos (asignacion por grupo/combo) */
   grupo: boolean;
+  /** detalle del movimiento en el banco (para comparar el tercero) */
+  refText: string;
 }
 
 interface BankIndex {
@@ -144,7 +152,7 @@ async function buildBankIndex(year: number): Promise<BankIndex> {
           const nums = (String(mv.docValue).match(/\d+/g) ?? []).filter((n) => n.length >= 5);
           for (const num of nums) {
             if (!byDoc.has(num)) byDoc.set(num, []);
-            byDoc.get(num)!.push({ bankKey, sheet: ws.name, row: mv.row, grupo: nums.length > 1 });
+            byDoc.get(num)!.push({ bankKey, sheet: ws.name, row: mv.row, grupo: nums.length > 1, refText: mv.refText });
           }
         }
       }
@@ -187,6 +195,7 @@ export const PROBLEMAS = new Set([
   "BANCO DISTINTO",
   "VARIAS FILAS",
   "CANCELADO AUN DESCARGADO",
+  "TERCERO FIDUCIA INCONSISTENTE",
 ]);
 
 interface Validacion {
@@ -255,6 +264,56 @@ function validar(d: RawDoc, index: BankIndex, bancoSap: string): Validacion {
     }
   }
   return { conciliacion: "Descargado", ubicacion, observacion: "" };
+}
+
+// ---------------------------------------------------------------------------
+// Traslados entre cuentas propias y fiducias: el tercero de la fiducia
+// ---------------------------------------------------------------------------
+
+const isFiduciaTransfer = (d: RawDoc) =>
+  d.CardCode === FIDUCIA_ACCOUNT || (d.PaymentAccounts ?? []).some((l) => l.AccountCode === FIDUCIA_ACCOUNT);
+
+/** Tercero y codigo de la fiducia (no la cuenta 12450505 / FIDECOMISO). */
+function terceroFiducia(d: RawDoc): { nombre: string; codigo: string } {
+  const lineaCod = (d.PaymentAccounts ?? []).map((l) => l.U_HBT_Tercero).find((c) => !!c);
+  const codigo = d.U_CodTecero || d.U_HBT_Tercero || lineaCod || d.CardCode || "";
+  return { nombre: d.U_DescripTercero || FIDUCIA_TERCEROS[codigo] || d.CardName || "", codigo };
+}
+
+/**
+ * 1) En SAP deben coincidir el codigo de tercero (U_CodTecero), el socio de
+ *    negocios (U_HBT_Tercero) y el socio de negocios de la linea, y el nombre
+ *    debe ser el de ese codigo.
+ * 2) El tercero debe corresponder al detalle del movimiento en el banco
+ *    (ej. Bancolombia: "TRASLADO DE FONDO DE INVERS" = Fiducuenta; "PAGO DE
+ *    PROV FIC ABIERTO SUM" = Fiduciaria Bogota).
+ * Devuelve las observaciones de lo que no coincide (vacio si todo cuadra).
+ */
+function validarTerceroFiducia(d: RawDoc, locs: Loc[]): string[] {
+  const obs: string[] = [];
+  const { nombre, codigo } = terceroFiducia(d);
+  const lineas = (d.PaymentAccounts ?? []).map((l) => l.U_HBT_Tercero).filter((c): c is string => !!c);
+  const campos: [string, string | null | undefined][] = [
+    ["codigo de tercero", d.U_CodTecero],
+    ["socio de negocios", d.U_HBT_Tercero],
+    ["socio de negocios de la linea", lineas[0]],
+  ];
+  const faltan = campos.filter(([, v]) => !v).map(([n]) => n);
+  if (faltan.length > 0) obs.push(`SAP sin ${faltan.join(" / ")}.`);
+  const distintos = new Set(campos.map(([, v]) => v).filter((v): v is string => !!v));
+  if (lineas.some((c) => c !== lineas[0])) distintos.add("(lineas distintas)");
+  if (distintos.size > 1) obs.push(`En SAP no coinciden: ${campos.map(([n, v]) => `${n} ${v ?? "-"}`).join("; ")}.`);
+  const esperado = FIDUCIA_TERCEROS[codigo];
+  if (esperado && d.U_DescripTercero && d.U_DescripTercero !== esperado) {
+    obs.push(`El nombre del tercero en SAP (${d.U_DescripTercero}) no corresponde al codigo ${codigo} (${esperado}).`);
+  }
+  for (const l of locs) {
+    const dice = fiduciaCodeForBankText(l.refText);
+    if (dice && codigo && dice !== codigo) {
+      obs.push(`En ${l.bankKey} ${l.sheet} fila ${l.row} el banco indica ${FIDUCIA_TERCEROS[dice]} pero SAP trae ${nombre || codigo} (${codigo}).`);
+    }
+  }
+  return obs;
 }
 
 // ---------------------------------------------------------------------------
@@ -354,6 +413,14 @@ function buildSeriesRows(docs: RawDoc[], extraNames: Map<string, string>, index:
     let banco = bancoDe(d, extraNames);
     if (esMiami && usd !== null) banco = `${banco} (USD)`;
     const v = validar(d, index, banco);
+    const fiducia = isFiduciaTransfer(d);
+    if (fiducia && d.Cancelled !== "tYES") {
+      const obsF = validarTerceroFiducia(d, index.byDoc.get(String(n)) ?? []);
+      if (obsF.length > 0) {
+        if (v.conciliacion === "Descargado") v.conciliacion = "TERCERO FIDUCIA INCONSISTENTE";
+        v.observacion = [v.observacion, ...obsF].filter(Boolean).join(" ");
+      }
+    }
     // Traslado entre cuentas propias cuya otra pata es Miami (venta de dolares)
     if (!esMiami && usd !== null && accountKeyOf(d.CardCode) === MIAMI_ACCOUNT) {
       const nota = `Pata Miami: USD ${usd.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}.`;
@@ -373,8 +440,8 @@ function buildSeriesRows(docs: RawDoc[], extraNames: Map<string, string>, index:
         estado: d.Cancelled === "tYES" ? "CANCELADO" : "VIGENTE",
         fecha: d.DocDate.slice(0, 10),
         banco,
-        tercero: d.CardName || "",
-        codigo: d.CardCode || "",
+        tercero: fiducia ? terceroFiducia(d).nombre : d.CardName || "",
+        codigo: fiducia ? terceroFiducia(d).codigo : d.CardCode || "",
         valor: esMiami && usd !== null ? usd : totalCop,
         conciliacion: v.conciliacion,
         ubicacion: v.ubicacion,

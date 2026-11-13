@@ -17,7 +17,7 @@ import {
 import { fixCompensacionDates, findHeaderRowAndCols, READERS, REQUIRED_HEADERS_HINT } from "./readers";
 import { loadSapDocs } from "./sap";
 import type { AccountStats, BankMove, CellWrite, SapDoc, SummaryRow } from "./types";
-import { isBankFee, isCashDepositText, isFiduciaDoc, isFiduciaText, norm, normAccount, sameMonth } from "./utils";
+import { FIDUCIA_TERCEROS, fiduciaCodeForBankText, isBankFee, isCashDepositText, isFiduciaDoc, isFiduciaText, norm, normAccount, sameMonth } from "./utils";
 
 export interface ReconcileInput {
   sapBuffer: Buffer;
@@ -341,11 +341,15 @@ export async function reconcileDocs(pool: SapDoc[], bankBuffers: Map<string, Buf
           } else if (isFiduciaText(mv.refText)) {
             // Solo si existe un documento de la fiducia que pueda cruzar por
             // valor y tipo; si no, el movimiento sigue con el pool completo
-            // (ej. un pago a un proveedor que menciona una fiduciaria).
-            const soloFiducia = pool.filter(
-              (d) => isFiduciaDoc(d) && d.tipo === mv.tipo && Math.abs(d.value - mv.value) <= VALUE_TOLERANCE
-            );
-            if (soloFiducia.length > 0) poolForMatch = pool.filter(isFiduciaDoc);
+            // (ej. un pago a un proveedor que menciona una fiduciaria). Si el
+            // banco indica CUAL fiducia es (Fiducuenta vs Fiduciaria Bogota),
+            // se prefieren los documentos de ese tercero.
+            const todosFiducia = pool.filter(isFiduciaDoc);
+            const nombre = FIDUCIA_TERCEROS[fiduciaCodeForBankText(mv.refText) ?? ""];
+            const cruzan = (d: SapDoc) => d.tipo === mv.tipo && Math.abs(d.value - mv.value) <= VALUE_TOLERANCE;
+            const delTercero = nombre ? todosFiducia.filter((d) => d.tercero === nombre) : [];
+            if (delTercero.some(cruzan)) poolForMatch = delTercero;
+            else if (todosFiducia.some(cruzan)) poolForMatch = todosFiducia;
           }
         }
 

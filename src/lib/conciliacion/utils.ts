@@ -186,14 +186,36 @@ export function sequenceRatio(a: string, b: string): number {
   return (2 * matches) / (a.length + b.length);
 }
 
-/** Documento SAP que es un traslado desde/hacia la fiducia (FIDECOMISO / FIDUCIARIA). */
+/**
+ * Terceros de las fiducias propias en SAP (campo "codigo de tercero" y su
+ * descripcion). Los recibos de traslado entre cuentas propias y fiducias traen
+ * como socio de negocios la cuenta 12450505 (FIDECOMISO); el tercero REAL de
+ * la fiducia va en U_CodTecero / U_HBT_Tercero (cabecera y linea).
+ */
+export const FIDUCIA_TERCEROS: Record<string, string> = {
+  "AC800180687-01": "FONDO DE INVERSION COLECTIVA ABIERTO FIDUCUENTA",
+  "AC800142383-01": "FIDUCIARIA BOGOTA S.A",
+};
+
+/** Documento SAP que es un traslado desde/hacia la fiducia (FIDECOMISO / fiducias propias). */
 export function isFiduciaDoc(d: { tercero: string; infoDetallada: string }): boolean {
-  return /FIDECOMISO|FIDUCIARIA|FIDUCIA|FIDEICOMISO/.test(d.tercero.toUpperCase()) || d.infoDetallada.includes("12450505");
+  return /FIDECOMISO|FIDUCIARIA BOGOTA|FONDO DE INVERSION COLECTIVA/.test(d.tercero.toUpperCase()) || d.infoDetallada.includes("12450505");
 }
 
 /** Movimiento bancario que el propio banco describe como traslado de/hacia la fiducia. */
 export function isFiduciaText(refText: string): boolean {
-  return /FIDUCUENTA|FIDUBOGOT|FONDO DE INVERS|FIDEICOMISO|FIDECOMISO/.test(refText);
+  return /FIDUCUENTA|FIDUBOGOT|FONDO DE INVERS|FIC ABIERTO|FIDEICOMISO|FIDECOMISO/.test(refText);
+}
+
+/**
+ * Tercero de fiducia (codigo) que el detalle del banco indica:
+ *  - "TRASLADO DE/A FONDO DE INVERS..." / FIDUCUENTA -> fondo de inversion colectiva abierto Fiducuenta
+ *  - "PAGO DE PROV FIC ABIERTO SUM..." / FIDUBOGOTA -> Fiduciaria Bogota S.A
+ */
+export function fiduciaCodeForBankText(refText: string): string | null {
+  if (/TRASLADO (DE|A) FONDO DE INVERS|FIDUCUENTA/.test(refText)) return "AC800180687-01";
+  if (/FIC ABIERTO|FIDUBOGOT/.test(refText)) return "AC800142383-01";
+  return null;
 }
 
 /** Consignacion en efectivo: nunca es un traslado desde la fiducia. */
